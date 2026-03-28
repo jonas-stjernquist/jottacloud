@@ -22,8 +22,10 @@ func main() {
 	}
 
 	if localtime := os.Getenv("LOCALTIME"); localtime != "" {
-		zonePath := "/usr/share/zoneinfo/" + localtime
-		if _, err := os.Stat(zonePath); err == nil {
+		zonePath := filepath.Join("/usr/share/zoneinfo", localtime)
+		if !strings.HasPrefix(zonePath, "/usr/share/zoneinfo/") {
+			fmt.Fprintf(os.Stderr, "invalid LOCALTIME: %s\n", localtime)
+		} else if _, err := os.Stat(zonePath); err == nil {
 			os.Remove("/etc/localtime")
 			os.Symlink(zonePath, "/etc/localtime")
 		}
@@ -46,7 +48,7 @@ func main() {
 	jottad.Stdout, jottad.Stderr = os.Stdout, os.Stderr
 	must(jottad.Start())
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(time.Second)
 
 	startupTimeout := envInt("STARTUP_TIMEOUT", 15)
 	fmt.Printf("Waiting for jottad to start (timeout: %ds). ", startupTimeout)
@@ -115,8 +117,10 @@ func main() {
 	}
 
 	scanInterval := os.Getenv("JOTTA_SCANINTERVAL")
-	fmt.Printf("Setting scan interval to %s.\n", scanInterval)
-	run("jotta-cli", "config", "set", "scaninterval", scanInterval)
+	if scanInterval != "" {
+		fmt.Printf("Setting scan interval to %s.\n", scanInterval)
+		run("jotta-cli", "config", "set", "scaninterval", scanInterval)
+	}
 
 	tail := exec.Command("jotta-cli", "tail")
 	tail.Stdout, tail.Stderr = os.Stdout, os.Stderr
@@ -236,7 +240,9 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 func run(name string, args ...string) {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s %v: %v\n", name, args, err)
+	}
 }
 
 func loadEnvFile(path string) {
@@ -264,7 +270,7 @@ func loadEnvFile(path string) {
 
 func forceSymlink(target, link string) {
 	os.Remove(link)
-	os.Symlink(target, link)
+	must(os.Symlink(target, link))
 }
 
 func must(err error) {
