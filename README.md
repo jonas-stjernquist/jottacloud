@@ -2,7 +2,7 @@
 
 Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running on Debian. &nbsp;·&nbsp; [GitHub](https://github.com/jonas-stjernquist/jottacloud)
 
-Built on `debian:bookworm-slim` with the official `jotta-cli` package. The image is automatically rebuilt weekly via GitHub Actions to pick up the latest OS security patches and Jottacloud CLI updates.
+Built on `debian:trixie-slim` with the official `jotta-cli` package. The image is automatically rebuilt weekly via GitHub Actions to pick up the latest OS security patches and Jottacloud CLI updates.
 
 **Supported platforms:** `linux/amd64`, `linux/arm64`
 
@@ -146,12 +146,8 @@ To set up automated rebuilds in your own fork, add these GitHub repository secre
 
 ## Security
 
-- **Minimal base image:** `debian:bookworm-slim` reduces attack surface
+- **Minimal base image:** `debian:trixie-slim` reduces attack surface
 - **No recommended packages:** `--no-install-recommends` keeps dependencies minimal
 - **Weekly rebuilds:** automated CI ensures OS and CLI stay patched
 - **Docker secrets support:** avoid passing tokens via environment variables in production
-
-## Debian Version Note
-
-This image uses Debian 12 (bookworm) because Debian 13 (trixie) switched to Sequoia PGP for apt signature verification, which is currently incompatible with the Jottacloud apt repository's GPG signature ([jotta-cli-issues#208](https://github.com/jotta/jotta-cli-issues/issues/208)). The image will be upgraded to Debian 13 once this is resolved upstream.
 

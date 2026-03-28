@@ -1,10 +1,10 @@
-FROM golang:1.22-bookworm AS builder
+FROM golang:trixie AS builder
 
 WORKDIR /build
 COPY go.mod main.go ./
 RUN go mod tidy && CGO_ENABLED=0 go build -ldflags="-s -w" -o entrypoint .
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 LABEL maintainer="jonas-stjernquist" \
       org.opencontainers.image.source="https://github.com/jonas-stjernquist/jottacloud" \

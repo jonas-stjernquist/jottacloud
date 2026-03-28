@@ -60,4 +60,4 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: stjernquist/jottacloud
-          short-description: "Jottacloud CLI backup client in Docker — works on Synology NAS without SSH or Package Center"
+          short-description: "Jottacloud CLI backup client in Docker — works on Synology NAS"
