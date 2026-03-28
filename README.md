@@ -4,6 +4,8 @@ Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running o
 
 Built on `debian:bookworm-slim` with the official `jotta-cli` package. The image is automatically rebuilt weekly via GitHub Actions to pick up the latest OS security patches and Jottacloud CLI updates.
 
+**Supported platforms:** `linux/amd64`, `linux/arm64`
+
 Based on [bluet/docker-jottacloud](https://github.com/bluet/docker-jottacloud/).
 
 ## Quick Start
