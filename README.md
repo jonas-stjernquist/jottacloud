@@ -39,8 +39,14 @@ docker run \
 | Path | Description |
 |------|-------------|
 | `/data/jottad` | Persistent config and state. **Mount this to preserve login and backup progress across restarts.** |
-| `/backup/` | Data to back up. Mount directories under this path, e.g. `-v /home:/backup/home`. |
+| `/backup/` | Backup source. Each subdirectory is registered via `jotta-cli add`, e.g. `-v /home:/backup/home`. |
+| `/sync/` | Sync source. Each subdirectory is registered via `jotta-cli sync setup`, e.g. `-v /photos:/sync/photos`. |
 | `/config/ignorefile` | Optional gitignore-style file for excluding paths from backup. |
+
+### Backup vs. Sync
+
+- **Backup** (`/backup/`): one-way upload, full version history, deleted files kept in trash for 30 days.
+- **Sync** (`/sync/`): bi-directional sync, up to 5 versions, deletions on device propagate to all synced locations.
 
 ## Docker Secrets
 
@@ -84,6 +90,23 @@ services:
       - "14443:14443"
 ```
 
+## Synology NAS (Container Manager)
+
+1. **Get a login token** from [Jottacloud Settings → Security](https://www.jottacloud.com/web/secure).
+2. **Create a persistent config folder** on the NAS, e.g. `/volume1/docker/jottacloud`.
+3. **Configure volumes** in Container Manager:
+
+   | Host path (Synology) | Container path | Purpose |
+   |----------------------|----------------|---------|
+   | `/volume1/docker/jottacloud` | `/data/jottad` | Persistent config (required) |
+   | `/volume1/homes` | `/backup/homes` | Backup |
+   | `/volume1/documents` | `/backup/documents` | Backup |
+   | `/volume1/photos` | `/sync/photos` | Sync |
+
+4. **Set environment variables**: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
+5. `JOTTAD_SYSTEMD` is already `0` by default — no action needed in Container Manager.
+6. `JOTTA_TOKEN` is only required on the **first start**. Once logged in, credentials are saved to the `/data/jottad` volume and the token is no longer needed.
+
 ## Debugging
 
 ```bash
@@ -102,6 +125,13 @@ docker exec jottacloud jotta-cli status
 This image is automatically rebuilt every Monday via GitHub Actions. Each rebuild pulls:
 - Latest Debian security patches (`apt-get upgrade`)
 - Latest Jottacloud CLI version from the official apt repository
+
+### Version naming
+
+- **GitHub releases** are tagged `v{jotta-cli-version}` (e.g. `v3.14.2`) and created automatically when a new CLI version is detected in the Jottacloud APT repo (checked daily at 08:00 UTC).
+- **Docker Hub tags**:
+  - `:latest` — updated on every build (weekly rebuilds + new CLI releases)
+  - `:{version}` (e.g. `:3.14.2`) — pinned tag created only when a new jotta-cli version is released
 
 To set up automated rebuilds in your own fork, add these GitHub repository secrets:
 - `DOCKERHUB_USERNAME` — your Docker Hub username
