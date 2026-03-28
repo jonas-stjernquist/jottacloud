@@ -1,6 +1,6 @@
 # Jottacloud Docker
 
-Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running on Debian.
+Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running on Debian. &nbsp;·&nbsp; [GitHub](https://github.com/jonas-stjernquist/jottacloud)
 
 Built on `debian:bookworm-slim` with the official `jotta-cli` package. The image is automatically rebuilt weekly via GitHub Actions to pick up the latest OS security patches and Jottacloud CLI updates.
 
@@ -26,6 +26,7 @@ docker run \
 | `JOTTA_SCANINTERVAL` | `12h` | How often to scan for changes. Examples: `1h`, `30m`, `0` (realtime). |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
 | `STARTUP_TIMEOUT` | `15` | Seconds to wait for jottad to start before failing. |
+| `JOTTAD_SYSTEMD` | `0` | Controls whether the `jottad` daemon attempts systemd integration (sd_notify, socket activation). Set to `0` in this image since Docker containers don't run systemd. Set to `1` only if running `jottad` directly on a host with systemd. |
 
 ### Environment variable priority (highest last)
 
@@ -92,9 +93,16 @@ services:
 
 ## Synology NAS (Container Manager)
 
+Jottacloud does not offer a native Synology package in the Package Center, and installing `jotta-cli` directly on DSM requires SSH access to the NAS and manual package management — steps that are error-prone, undone by DSM upgrades, and unsupported by Jottacloud. This image solves that: pull `stjernquist/jottacloud` from Docker Hub in Container Manager and you get a fully self-contained, auto-updating Jottacloud backup client without ever opening a terminal.
+
+The image also handles a common compatibility problem: `jottad` normally expects to run under systemd, which does not exist inside a container. This image sets `JOTTAD_SYSTEMD=0` so the daemon starts correctly in the Docker environment.
+
+### Setup
+
 1. **Get a login token** from [Jottacloud Settings → Security](https://www.jottacloud.com/web/secure).
 2. **Create a persistent config folder** on the NAS, e.g. `/volume1/docker/jottacloud`.
-3. **Configure volumes** in Container Manager:
+3. In **Container Manager → Registry**, search for `stjernquist/jottacloud` and download the image.
+4. **Configure volumes** when creating the container:
 
    | Host path (Synology) | Container path | Purpose |
    |----------------------|----------------|---------|
@@ -103,8 +111,7 @@ services:
    | `/volume1/documents` | `/backup/documents` | Backup |
    | `/volume1/photos` | `/sync/photos` | Sync |
 
-4. **Set environment variables**: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
-5. `JOTTAD_SYSTEMD` is already `0` by default — no action needed in Container Manager.
+5. **Set environment variables**: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
 6. `JOTTA_TOKEN` is only required on the **first start**. Once logged in, credentials are saved to the `/data/jottad` volume and the token is no longer needed.
 
 ## Debugging
