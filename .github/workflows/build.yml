@@ -3,8 +3,10 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
+  release:
+    types: [published]
   schedule:
-    # Rebuild every Monday at 06:00 UTC to pick up OS and CLI updates
+    # Rebuild every Monday at 06:00 UTC to pick up OS patches
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
@@ -25,12 +27,22 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Determine tags
+        id: tags
+        run: |
+          TAGS="stjernquist/jottacloud:latest"
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+            TAGS="stjernquist/jottacloud:${VERSION},stjernquist/jottacloud:latest"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            stjernquist/jottacloud:latest
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -1,0 +1,47 @@
+name: Check for New Jottacloud CLI Version
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch latest jotta-cli version from APT repo
+        id: apt
+        run: |
+          VERSION=$(curl -fsSL https://repo.jotta.cloud/debian/dists/debian/main/binary-amd64/Packages \
+            | grep -m1 '^Source:' \
+            | sed -n 's/.*(\(.*\)).*/\1/p')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Found APT version: $VERSION"
+
+      - name: Get latest GitHub release tag
+        id: gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "none")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest GitHub release tag: $TAG"
+
+      - name: Create release if version is new
+        if: steps.apt.outputs.version != '' && format('v{0}', steps.apt.outputs.version) != steps.gh.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.apt.outputs.version }}"
+          echo "Creating release $TAG"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "Jottacloud CLI ${{ steps.apt.outputs.version }}" \
+            --latest
