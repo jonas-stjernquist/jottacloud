@@ -134,15 +134,13 @@ for dir in /backup/*; do
   fi
 done
 
-# Add sync directories
-echo "Adding sync directories."
-for dir in /sync/*; do
-  if [ -d "${dir}" ]; then
-    set +e
-    jotta-cli sync setup --root "${dir}"
-    set -e
-  fi
-done
+# Add sync directory (jotta-cli supports only one sync root)
+if [ -d "/sync" ] && [ "$(ls -A /sync 2>/dev/null)" ]; then
+  echo "Adding sync directory."
+  set +e
+  jotta-cli sync setup --root /sync
+  set -e
+fi
 
 # Load ignore file if present
 if [ -f /config/ignorefile ]; then

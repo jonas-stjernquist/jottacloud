@@ -41,13 +41,13 @@ docker run \
 |------|-------------|
 | `/data/jottad` | Persistent config and state. **Mount this to preserve login and backup progress across restarts.** |
 | `/backup/` | Backup source. Each subdirectory is registered via `jotta-cli add`, e.g. `-v /home:/backup/home`. |
-| `/sync/` | Sync source. Each subdirectory is registered via `jotta-cli sync setup`, e.g. `-v /photos:/sync/photos`. |
+| `/sync` | Sync source. Mount a **single** directory here, e.g. `-v /photos:/sync`. Only one sync root is supported by `jotta-cli`. |
 | `/config/ignorefile` | Optional gitignore-style file for excluding paths from backup. |
 
 ### Backup vs. Sync
 
 - **Backup** (`/backup/`): one-way upload, full version history, deleted files kept in trash for 30 days.
-- **Sync** (`/sync/`): bi-directional sync, up to 5 versions, deletions on device propagate to all synced locations.
+- **Sync** (`/sync`): bi-directional sync, up to 5 versions, deletions on device propagate to all synced locations. Only one sync root is supported by `jotta-cli`.
 
 ## Docker Secrets
 
@@ -109,7 +109,7 @@ The image also handles a common compatibility problem: `jottad` normally expects
    | `/volume1/docker/jottacloud` | `/data/jottad` | Persistent config (required) |
    | `/volume1/homes` | `/backup/homes` | Backup |
    | `/volume1/documents` | `/backup/documents` | Backup |
-   | `/volume1/photos` | `/sync/photos` | Sync |
+   | `/volume1/photos` | `/sync` | Sync |
 
 5. **Set environment variables**: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
 6. `JOTTA_TOKEN` is only required on the **first start**. Once logged in, credentials are saved to the `/data/jottad` volume and the token is no longer needed.
