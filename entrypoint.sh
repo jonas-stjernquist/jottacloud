@@ -94,7 +94,7 @@ while :; do
           eof {
             exit 1
           }
-          \"Devicename*: \" {
+          \"Device name*: \" {
             send \"$JOTTA_DEVICE\n\"
             expect eof
           }
