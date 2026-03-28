@@ -76,8 +76,13 @@ func main() {
 			}, 20*time.Second)
 			loginWithToken()
 
-		case strings.Contains(out, "Not logged in"),
-			strings.Contains(out, "The device name has not been set"):
+		case strings.Contains(out, "The device name has not been set"):
+			fmt.Println("Device name not set, configuring.")
+			ptyRun("jotta-cli", []string{"status"}, []prompt{
+				{"Device name", os.Getenv("JOTTA_DEVICE")},
+			}, 10*time.Second)
+
+		case strings.Contains(out, "Not logged in"):
 			fmt.Println("First time login.")
 			if err := loginWithToken(); err != nil {
 				fmt.Fprintln(os.Stderr, "Login failed:", err)
