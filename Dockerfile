@@ -10,7 +10,8 @@ ENV JOTTA_TOKEN="**None**" \
     JOTTA_DEVICE="**docker-jottacloud**" \
     JOTTA_SCANINTERVAL="12h" \
     LOCALTIME="Europe/Stockholm" \
-    STARTUP_TIMEOUT=15
+    STARTUP_TIMEOUT=15 \
+    JOTTAD_SYSTEMD=0
 
 RUN apt-get update && \
     apt-get upgrade -y && \
