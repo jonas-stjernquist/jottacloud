@@ -82,7 +82,7 @@ while :; do
       expect eof
       "
 
-    elif [[ "$STATUS_OUTPUT" =~ "Not logged in" ]]; then
+    elif [[ "$STATUS_OUTPUT" =~ "Not logged in" ]] || [[ "$STATUS_OUTPUT" =~ "The device name has not been set" ]]; then
       echo "First time login."
 
       /usr/bin/expect -c "
