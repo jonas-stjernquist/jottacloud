@@ -1,3 +1,9 @@
+FROM golang:1.22-bookworm AS builder
+
+WORKDIR /build
+COPY go.mod main.go ./
+RUN go mod tidy && CGO_ENABLED=0 go build -ldflags="-s -w" -o entrypoint .
+
 FROM debian:bookworm-slim
 
 LABEL maintainer="jonas-stjernquist" \
@@ -16,7 +22,7 @@ ENV JOTTA_TOKEN="**None**" \
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get -y install --no-install-recommends \
-      curl ca-certificates expect psmisc && \
+      curl ca-certificates psmisc && \
     curl -fsSL https://repo.jotta.cloud/jotta.gpg \
       -o /usr/share/keyrings/jotta.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/jotta.gpg] https://repo.jotta.cloud/debian debian main" \
@@ -27,10 +33,8 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-COPY entrypoint.sh /src/
-WORKDIR /src
-RUN chmod +x entrypoint.sh
+COPY --from=builder /build/entrypoint /src/entrypoint
 
 EXPOSE 14443
 
-ENTRYPOINT ["/src/entrypoint.sh"]
+ENTRYPOINT ["/src/entrypoint"]

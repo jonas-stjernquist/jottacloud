@@ -6,8 +6,6 @@ Built on `debian:bookworm-slim` with the official `jotta-cli` package. The image
 
 **Supported platforms:** `linux/amd64`, `linux/arm64`
 
-Based on [bluet/docker-jottacloud](https://github.com/bluet/docker-jottacloud/).
-
 ## Quick Start
 
 ```bash
@@ -157,6 +155,3 @@ To set up automated rebuilds in your own fork, add these GitHub repository secre
 
 This image uses Debian 12 (bookworm) because Debian 13 (trixie) switched to Sequoia PGP for apt signature verification, which is currently incompatible with the Jottacloud apt repository's GPG signature ([jotta-cli-issues#208](https://github.com/jotta/jotta-cli-issues/issues/208)). The image will be upgraded to Debian 13 once this is resolved upstream.
 
-## Credits
-
-Based on [bluet/docker-jottacloud](https://github.com/bluet/docker-jottacloud/) by [BlueT - Matthew Lien](https://github.com/bluet).
