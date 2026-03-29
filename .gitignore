@@ -1,3 +1,6 @@
 *.env
 .env
 /jottacloud
+test/.env
+test/data/
+testdata/fake-cli/fake-cli

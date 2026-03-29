@@ -1,0 +1,2 @@
+This is a test file for Jottacloud backup integration testing.
+Created by the jottacloud test suite.

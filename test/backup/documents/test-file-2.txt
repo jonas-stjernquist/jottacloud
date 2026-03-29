@@ -1,0 +1,2 @@
+Second test file for backup verification.
+This file should appear in the backup directory listing.

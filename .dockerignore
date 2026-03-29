@@ -1,5 +1,10 @@
 .git
 .github
 .gitignore
+.claude
 README.md
 LICENSE
+test/
+testdata/
+docs/
+*.md

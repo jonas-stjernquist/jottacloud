@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Test: Removing an extra backup directory.
+# Verifies a backup path can be unregistered with jotta-cli rem.
+# Reuses persisted credentials from /data/jottad — no clean_data.
+set -euo pipefail
+source "$(dirname "$0")/lib.sh"
+
+echo "=== Test: Remove Extra Backup Directory ==="
+
+if [[ ! -f "$TEST_DIR/.env" ]]; then
+    red "ERROR: test/.env not found."
+    exit 1
+fi
+
+mkdir -p "$TEST_DIR/backup/photos"
+trap 'compose_down; rm -rf "$TEST_DIR/backup/photos"' EXIT
+
+build_image
+compose_up
+
+if wait_for_startup 90; then
+    pass "Container started"
+
+    output="$(container_exec jotta-cli status 2>&1)" || true
+    assert_contains "$output" "/backup/photos" "extra backup dir registered before removal"
+
+    container_exec jotta-cli rem /backup/photos 2>&1 || true
+    sleep 3
+
+    output="$(container_exec jotta-cli status 2>&1)" || true
+    assert_not_contains "$output" "/backup/photos" "extra backup dir removed"
+else
+    fail "Container did not start"
+fi
+
+summary

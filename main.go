@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,11 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+)
+
+var (
+	ptyOutput io.Writer = os.Stdout
+	jottaCLI            = "jotta-cli"
 )
 
 func main() {
@@ -65,25 +71,38 @@ func main() {
 		switch {
 		case strings.Contains(out, "Found remote device that matches this machine"):
 			fmt.Println("Found matching device name, re-using.")
-			ptyRun("jotta-cli", []string{"status"}, []prompt{
+			ptyRun(jottaCLI, []string{"status"}, []prompt{
 				{"Do you want to re-use this device? (yes/no): ", "yes"},
 			}, time.Second)
 
 		case strings.Contains(out, "Error: The session has been revoked."):
 			fmt.Println("Session expired. Logging out and back in.")
-			ptyRun("jotta-cli", []string{"logout"}, []prompt{
+			ptyRun(jottaCLI, []string{"logout"}, []prompt{
 				{"Backup will stop. Continue?(y/n): ", "y"},
 			}, 20*time.Second)
-			loginWithToken()
+			if err := loginWithToken(); err != nil {
+				fmt.Fprintln(os.Stderr, "Login failed:", err)
+				os.Exit(1)
+			}
 
 		case strings.Contains(out, "The device name has not been set"):
 			fmt.Println("Device name not set, configuring.")
-			ptyRun("jotta-cli", []string{"status"}, []prompt{
+			ptyRun(jottaCLI, []string{"status"}, []prompt{
 				{"Device name", os.Getenv("JOTTA_DEVICE")},
 			}, 10*time.Second)
 
 		case strings.Contains(out, "Not logged in"):
 			fmt.Println("First time login.")
+			if err := loginWithToken(); err != nil {
+				fmt.Fprintln(os.Stderr, "Login failed:", err)
+				os.Exit(1)
+			}
+
+		case strings.Contains(out, "does not exist remotely"):
+			fmt.Println("Device not found remotely. Logging out and back in.")
+			ptyRun(jottaCLI, []string{"logout"}, []prompt{
+				{"Backup will stop. Continue?(y/n): ", "y"},
+			}, 20*time.Second)
 			if err := loginWithToken(); err != nil {
 				fmt.Fprintln(os.Stderr, "Login failed:", err)
 				os.Exit(1)
@@ -94,7 +113,7 @@ func main() {
 		if startupTimeout <= 0 {
 			fmt.Println("\nStartup timeout reached.")
 			fmt.Println("ERROR: Unable to determine why jottad cannot start:")
-			run("jotta-cli", "status")
+			run(jottaCLI, "status")
 			os.Exit(1)
 		}
 		fmt.Printf(".%d.", startupTimeout)
@@ -105,37 +124,60 @@ func main() {
 	matches, _ := filepath.Glob("/backup/*")
 	for _, dir := range matches {
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			run("jotta-cli", "add", dir)
+			run(jottaCLI, "add", dir)
 		}
 	}
+	// Give jottad time to fully initialize newly added backup objects
+	// before we call ignores add, which iterates all backups globally.
+	time.Sleep(3 * time.Second)
 
 	if fi, err := os.Stat("/sync"); err == nil && fi.IsDir() {
 		if entries, _ := os.ReadDir("/sync"); len(entries) > 0 {
 			fmt.Println("Adding sync directory.")
-			run("jotta-cli", "sync", "setup", "--root", "/sync")
+			out, _ := jottaStatus(5 * time.Second)
+			if strings.Contains(out, "Sync is not enabled") {
+				ptyRun(jottaCLI, []string{"sync", "setup", "--root", "/sync"}, []prompt{
+					{"Continue sync setup? [yes]:", "yes"},
+					{"Chose the error reporting mode for sync:", "off"},
+					{"Do you want to setup selective sync? (y/n):", "n"},
+				}, 30*time.Second)
+			}
+			run(jottaCLI, "sync", "start")
 		}
 	}
 
 	if _, err := os.Stat("/config/ignorefile"); err == nil {
 		fmt.Println("Loading ignore file.")
-		run("jotta-cli", "ignores", "set", "/config/ignorefile")
+		if f, err := os.Open("/config/ignorefile"); err == nil {
+			defer f.Close()
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				run(jottaCLI, "ignores", "add", "--pattern", line)
+			}
+		}
 	}
 
 	scanInterval := os.Getenv("JOTTA_SCANINTERVAL")
 	if scanInterval != "" {
 		fmt.Printf("Setting scan interval to %s.\n", scanInterval)
-		run("jotta-cli", "config", "set", "scaninterval", scanInterval)
+		run(jottaCLI, "config", "set", "scaninterval", scanInterval)
 	}
 
-	tail := exec.Command("jotta-cli", "tail")
+	tail := exec.Command(jottaCLI, "tail")
 	tail.Stdout, tail.Stderr = os.Stdout, os.Stderr
 	tail.Start()
 
+	fmt.Println("Monitoring active.")
+
 	for {
 		time.Sleep(15 * time.Second)
-		if err := exec.Command("jotta-cli", "status").Run(); err != nil {
+		if err := exec.Command(jottaCLI, "status").Run(); err != nil {
 			fmt.Println("Jottad exited unexpectedly:")
-			run("jotta-cli", "status")
+			run(jottaCLI, "status")
 			os.Exit(1)
 		}
 	}
@@ -147,7 +189,7 @@ type prompt struct {
 }
 
 func loginWithToken() error {
-	return ptyRun("jotta-cli", []string{"login"}, []prompt{
+	return ptyRun(jottaCLI, []string{"login"}, []prompt{
 		{"accept license (yes/no): ", "yes"},
 		{"Personal login token: ", os.Getenv("JOTTA_TOKEN")},
 		// Only one of the following two prompts will appear:
@@ -159,7 +201,7 @@ func loginWithToken() error {
 // jottaStatus runs jotta-cli status via a PTY so it flushes interactive prompts,
 // then kills the process after the timeout. Returns combined output and the exit error.
 func jottaStatus(timeout time.Duration) (string, error) {
-	cmd := exec.Command("jotta-cli", "status")
+	cmd := exec.Command(jottaCLI, "status")
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return "", err
@@ -174,7 +216,9 @@ func jottaStatus(timeout time.Duration) (string, error) {
 		for {
 			n, readErr := ptmx.Read(buf)
 			if n > 0 {
-				out.Write(buf[:n])
+				chunk := string(buf[:n])
+				out.WriteString(chunk)
+				answerTerminalQueries(ptmx, chunk)
 			}
 			if readErr != nil {
 				return
@@ -216,7 +260,8 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 		n, err := ptmx.Read(buf)
 		if n > 0 {
 			chunk := string(buf[:n])
-			fmt.Print(chunk)
+			fmt.Fprint(ptyOutput, chunk)
+			answerTerminalQueries(ptmx, chunk)
 			accumulated += chunk
 
 			for i, p := range prompts {
@@ -240,6 +285,22 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 		cmd.Process.Kill()
 	}
 	return cmd.Wait()
+}
+
+// answerTerminalQueries detects ANSI terminal capability queries in PTY output
+// and writes back appropriate responses. jotta-cli sends these queries when
+// running under a PTY and blocks until it receives responses.
+func answerTerminalQueries(ptmx *os.File, chunk string) {
+	// DSR (Device Status Report) — cursor position query: \x1b[6n
+	// Respond with cursor at row 1, col 1: \x1b[1;1R
+	if strings.Contains(chunk, "\x1b[6n") {
+		ptmx.Write([]byte("\x1b[1;1R"))
+	}
+	// OSC 11 — query background color: \x1b]11;?\x1b\\
+	// Respond with black: \x1b]11;rgb:0000/0000/0000\x1b\\
+	if strings.Contains(chunk, "\x1b]11;?") {
+		ptmx.Write([]byte("\x1b]11;rgb:0000/0000/0000\x1b\\"))
+	}
 }
 
 func run(name string, args ...string) {
