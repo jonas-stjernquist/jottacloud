@@ -17,9 +17,9 @@ go test -v -race -timeout 30s ./...
 
 **Integration tests** (requires PAT, always run in background):
 ```bash
-cd /home/jonas/Code/jottacloud/test && ./scripts/run-all.sh
+cd <repo-root>/test && ./scripts/run-all.sh
 ```
-Always use `run_in_background: true` — the suite takes several minutes.
+Always use the `bash` tool with `mode: "async"` — the suite takes several minutes.
 
 ## PAT (Personal Access Token) management
 
@@ -48,7 +48,7 @@ When the user provides a new token, write it directly to `test/.env`. The PAT is
 ### Fresh login sequence
 1. Ask user to generate a new PAT
 2. Write it to `test/.env`
-3. Clean stale data: `rm -rf /home/jonas/Code/jottacloud/test/data`
+3. Clean stale data: `rm -rf <repo-root>/test/data`
 4. Run the test suite
 
 ## Persistent state
