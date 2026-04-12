@@ -1,5 +1,7 @@
 # Jottacloud Docker
 
+** NOTE: This software is in a experimental stage and should not be considered as a stable solution **
+
 Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running on Debian. &nbsp;·&nbsp; [GitHub](https://github.com/jonas-stjernquist/jottacloud)
 
 Built on `debian:trixie-slim` with the official `jotta-cli` package. The image is automatically rebuilt weekly via GitHub Actions to pick up the latest OS security patches and Jottacloud CLI updates.
