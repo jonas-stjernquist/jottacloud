@@ -57,7 +57,10 @@ func main() {
 	// can write a response, otherwise the conversion may already have occurred.
 	for _, s := range sc.Steps {
 		if s.RawMode {
-			disableICRNL(os.Stdin)
+			if err := setRawInputMode(os.Stdin); err != nil {
+				fmt.Fprintf(os.Stderr, "setRawInputMode: %v\n", err)
+				os.Exit(2)
+			}
 			break
 		}
 	}
@@ -119,17 +122,21 @@ func main() {
 	os.Exit(sc.ExitCode)
 }
 
-// disableICRNL clears the ICRNL and ICANON flags on f's file descriptor.
-// ICRNL: stops the PTY from converting incoming \r to \n, so \r arrives as-is.
-// ICANON: disables line buffering so characters are delivered immediately rather
-// than waiting for a newline. Together these mirror what interactive CLIs do
-// when they put their stdin into raw mode to handle \r as the Enter key.
-func disableICRNL(f *os.File) {
+// setRawInputMode disables line-buffering (ICANON) and CR→NL conversion (ICRNL)
+// on f's file descriptor. Together these mirror what interactive CLIs do when
+// they put their stdin into raw mode so that \r is the Enter key and characters
+// are delivered immediately rather than waiting for a newline.
+func setRawInputMode(f *os.File) error {
 	var t syscall.Termios
-	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&t)))
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&t))); errno != 0 {
+		return errno
+	}
 	t.Iflag &^= syscall.ICRNL  // don't convert \r→\n on input
 	t.Lflag &^= syscall.ICANON // deliver characters immediately, don't buffer lines
 	t.Cc[syscall.VMIN] = 1     // block until at least 1 byte is available
 	t.Cc[syscall.VTIME] = 0    // no read timeout
-	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&t)))
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&t))); errno != 0 {
+		return errno
+	}
+	return nil
 }
