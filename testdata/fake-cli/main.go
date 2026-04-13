@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 type step struct {
@@ -21,6 +23,9 @@ type step struct {
 	DelayMs int `json:"delayMs,omitempty"`
 	// ChunkSize splits the prompt into chunks of this size (simulates partial reads).
 	ChunkSize int `json:"chunkSize,omitempty"`
+	// RawMode reads until \r (carriage return) instead of \n, simulating interactive
+	// CLIs that put stdin in raw mode and treat \r as the Enter key.
+	RawMode bool `json:"rawMode,omitempty"`
 }
 
 type scenario struct {
@@ -46,6 +51,17 @@ func main() {
 
 	reader := bufio.NewReader(os.Stdin)
 
+	// If any step uses raw mode (reads until \r), disable ICRNL now — before
+	// printing the first prompt — so that \r from the PTY master is delivered
+	// as-is instead of being converted to \n. This must happen before ptyRun
+	// can write a response, otherwise the conversion may already have occurred.
+	for _, s := range sc.Steps {
+		if s.RawMode {
+			disableICRNL(os.Stdin)
+			break
+		}
+	}
+
 	for _, s := range sc.Steps {
 		if s.DelayMs > 0 {
 			time.Sleep(time.Duration(s.DelayMs) * time.Millisecond)
@@ -65,12 +81,26 @@ func main() {
 			fmt.Print(s.Prompt)
 		}
 
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read error: %v\n", err)
-			os.Exit(2)
+		var (
+			line string
+			err  error
+		)
+		if s.RawMode {
+			// ICRNL was disabled at startup, so \r arrives as-is from the master.
+			line, err = reader.ReadString('\r')
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read error: %v\n", err)
+				os.Exit(2)
+			}
+			line = strings.TrimRight(line, "\r")
+		} else {
+			line, err = reader.ReadString('\n')
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read error: %v\n", err)
+				os.Exit(2)
+			}
+			line = strings.TrimRight(line, "\r\n")
 		}
-		line = strings.TrimRight(line, "\r\n")
 
 		if s.Expect != "" && line != s.Expect {
 			fmt.Fprintf(os.Stderr, "expected %q, got %q\n", s.Expect, line)
@@ -87,4 +117,19 @@ func main() {
 	}
 
 	os.Exit(sc.ExitCode)
+}
+
+// disableICRNL clears the ICRNL and ICANON flags on f's file descriptor.
+// ICRNL: stops the PTY from converting incoming \r to \n, so \r arrives as-is.
+// ICANON: disables line buffering so characters are delivered immediately rather
+// than waiting for a newline. Together these mirror what interactive CLIs do
+// when they put their stdin into raw mode to handle \r as the Enter key.
+func disableICRNL(f *os.File) {
+	var t syscall.Termios
+	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&t)))
+	t.Iflag &^= syscall.ICRNL  // don't convert \r→\n on input
+	t.Lflag &^= syscall.ICANON // deliver characters immediately, don't buffer lines
+	t.Cc[syscall.VMIN] = 1     // block until at least 1 byte is available
+	t.Cc[syscall.VTIME] = 0    // no read timeout
+	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&t)))
 }
