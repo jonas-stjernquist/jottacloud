@@ -266,7 +266,7 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 
 			for i, p := range prompts {
 				if !responded[i] && strings.Contains(accumulated, p.match) {
-					ptmx.Write([]byte(p.response + "\n"))
+					ptmx.Write([]byte(p.response + "\r"))
 					responded[i] = true
 					accumulated = ""
 					break

@@ -68,6 +68,7 @@ type fakeScenario struct {
 	FinalOutput string     `json:"finalOutput,omitempty"`
 	ExitCode    int        `json:"exitCode"`
 	HangForever bool       `json:"hangForever,omitempty"`
+	RawMode     bool       `json:"rawMode,omitempty"`
 }
 
 func scenarioJSON(t *testing.T, sc fakeScenario) string {
@@ -225,6 +226,31 @@ func TestPtyRun_ExitCodePropagated(t *testing.T) {
 	err := ptyRun(fakeCLIPath, nil, nil, 2*time.Second)
 	if err == nil {
 		t.Fatal("expected error from non-zero exit code")
+	}
+}
+
+func TestPtyRun_CarriageReturnAsEnter(t *testing.T) {
+	// Verify that ptyRun sends \r (carriage return) as the line terminator, not \n.
+	// Interactive CLIs like jotta-cli put stdin in raw mode, where \r is the Enter
+	// key and \n is NOT treated as line submission. This test uses RawMode:true so
+	// fake-cli disables ICRNL on its PTY slave and reads until \r. If ptyRun were
+	// to send \n instead of \r, the fake-cli read would never terminate and the
+	// test would time out.
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{Prompt: promptLicense, Expect: "yes"},
+			{Prompt: promptToken, Expect: "tok"},
+		},
+		FinalOutput: "Logged in.\n",
+	})
+
+	err := ptyRun(fakeCLIPath, nil, []prompt{
+		{promptLicense, "yes"},
+		{promptToken, "tok"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

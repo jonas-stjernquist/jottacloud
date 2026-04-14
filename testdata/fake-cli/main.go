@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 type step struct {
@@ -29,6 +31,10 @@ type scenario struct {
 	ExitCode    int    `json:"exitCode"`
 	// HangForever causes the process to sleep indefinitely after steps (for timeout tests).
 	HangForever bool `json:"hangForever,omitempty"`
+	// RawMode disables ICRNL/ICANON on stdin so \r is delivered as-is (not converted
+	// to \n), matching interactive CLIs that put stdin in raw mode. When true, all
+	// steps read until \r instead of \n.
+	RawMode bool `json:"rawMode,omitempty"`
 }
 
 func main() {
@@ -45,6 +51,19 @@ func main() {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
+
+	// If the scenario uses raw mode, put stdin into raw mode before printing
+	// the first prompt so that \r from the PTY master is delivered as-is rather
+	// than being converted to \n. term.MakeRaw is used for portability across
+	// platforms (Linux, macOS, etc.).
+	if sc.RawMode {
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "term.MakeRaw: %v\n", err)
+			os.Exit(2)
+		}
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
+	}
 
 	for _, s := range sc.Steps {
 		if s.DelayMs > 0 {
@@ -65,12 +84,26 @@ func main() {
 			fmt.Print(s.Prompt)
 		}
 
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read error: %v\n", err)
-			os.Exit(2)
+		var (
+			line string
+			err  error
+		)
+		if sc.RawMode {
+			// ICRNL is disabled, so \r arrives as-is from the master.
+			line, err = reader.ReadString('\r')
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read error: %v\n", err)
+				os.Exit(2)
+			}
+			line = strings.TrimRight(line, "\r")
+		} else {
+			line, err = reader.ReadString('\n')
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read error: %v\n", err)
+				os.Exit(2)
+			}
+			line = strings.TrimRight(line, "\r\n")
 		}
-		line = strings.TrimRight(line, "\r\n")
 
 		if s.Expect != "" && line != s.Expect {
 			fmt.Fprintf(os.Stderr, "expected %q, got %q\n", s.Expect, line)
