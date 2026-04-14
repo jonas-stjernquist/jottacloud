@@ -481,7 +481,9 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 				}
 			}
 			if readErr != nil {
-				_ = sendResult(readResult{err: readErr})
+				if !sendResult(readResult{err: readErr}) {
+					return
+				}
 				return
 			}
 		}
