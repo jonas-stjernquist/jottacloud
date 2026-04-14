@@ -57,10 +57,12 @@ func main() {
 	// than being converted to \n. term.MakeRaw is used for portability across
 	// platforms (Linux, macOS, etc.).
 	if sc.RawMode {
-		if _, err := term.MakeRaw(int(os.Stdin.Fd())); err != nil {
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "term.MakeRaw: %v\n", err)
 			os.Exit(2)
 		}
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
 	}
 
 	for _, s := range sc.Steps {
