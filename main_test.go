@@ -19,7 +19,8 @@ var fakeCLIPath string
 func TestMain(m *testing.M) {
 	// Build fake-cli binary.
 	binPath := filepath.Join("testdata", "fake-cli", "fake-cli")
-	cmd := exec.Command("go", "build", "-o", binPath, "./testdata/fake-cli/")
+	cmd := exec.Command("go", "build", "-o", "fake-cli", ".")
+	cmd.Dir = filepath.Join("testdata", "fake-cli")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
