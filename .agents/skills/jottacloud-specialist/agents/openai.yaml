@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jottacloud Specialist"
+  short_description: "Jottacloud Docker, CLI, and support expert"
+  default_prompt: "Use $jottacloud-specialist to help with Jottacloud CLI, Docker, setup, or troubleshooting."

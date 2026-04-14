@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -9,23 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
-
-// Known jotta-cli prompt strings. Update these when jotta-cli changes prompts.
-// The login and status tests will fail if these no longer match what main.go uses.
-const (
-	promptLicense     = "accept license (yes/no): "
-	promptToken       = "Personal login token: "
-	promptDeviceName  = "Device name"
-	promptReuseDevice = "Do you want to re-use this device? (yes/no):"
-	promptLogout      = "Backup will stop. Continue?(y/n): "
-
-	// Status output patterns matched in the main() startup loop.
-	statusMatchingDevice   = "Found remote device that matches this machine"
-	statusSessionRevoked   = "Error: The session has been revoked."
-	statusNoDeviceName     = "The device name has not been set"
-	statusNotLoggedIn      = "Not logged in"
-	statusDeviceNotRemote  = "does not exist remotely"
 )
 
 var fakeCLIPath string
@@ -57,10 +43,14 @@ func TestMain(m *testing.M) {
 // --- fake-cli scenario helpers ---
 
 type fakeStep struct {
-	Prompt    string `json:"prompt"`
-	Expect    string `json:"expect,omitempty"`
-	DelayMs   int    `json:"delayMs,omitempty"`
-	ChunkSize int    `json:"chunkSize,omitempty"`
+	Prompt              string   `json:"prompt"`
+	PromptSuffix        string   `json:"promptSuffix,omitempty"`
+	PromptSuffixDelayMs int      `json:"promptSuffixDelayMs,omitempty"`
+	Expect              string   `json:"expect,omitempty"`
+	ExpectQueryReplies  []string `json:"expectQueryReplies,omitempty"`
+	QuietMs             int      `json:"quietMs,omitempty"`
+	DelayMs             int      `json:"delayMs,omitempty"`
+	ChunkSize           int      `json:"chunkSize,omitempty"`
 }
 
 type fakeScenario struct {
@@ -254,6 +244,75 @@ func TestPtyRun_CarriageReturnAsEnter(t *testing.T) {
 	}
 }
 
+func TestPtyRun_DefersPromptResponseAfterTerminalQueries(t *testing.T) {
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:             promptLicense,
+				PromptSuffix:       queryOSC11 + queryDSR,
+				ExpectQueryReplies: []string{replyDSR},
+				QuietMs:            20,
+				Expect:             "yes",
+			},
+		},
+		FinalOutput: "Logged in.\n",
+	})
+
+	err := ptyRun(fakeCLIPath, nil, []prompt{
+		{promptLicense, "yes"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPtyRun_WaitsForQuietReadBeforePromptResponse(t *testing.T) {
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:              promptLicense,
+				PromptSuffix:        queryOSC11 + queryDSR,
+				PromptSuffixDelayMs: 10,
+				ExpectQueryReplies:  []string{replyDSR},
+				QuietMs:             20,
+				Expect:              "yes",
+			},
+		},
+		FinalOutput: "Logged in.\n",
+	})
+
+	err := ptyRun(fakeCLIPath, nil, []prompt{
+		{promptLicense, "yes"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPtyRun_LogoutSuppressesOSC11Reply(t *testing.T) {
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:             queryOSC11 + queryDSR + promptLogout,
+				ExpectQueryReplies: []string{replyDSR},
+				QuietMs:            20,
+				Expect:             "y",
+			},
+		},
+		FinalOutput: "Logged out.\n",
+	})
+
+	err := ptyRun(fakeCLIPath, nil, []prompt{
+		{promptLogout, "y"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- loginWithToken tests ---
 
 func TestLoginWithToken_NewDevice(t *testing.T) {
@@ -330,51 +389,112 @@ func TestLoginWithToken_PromptStringsMatch(t *testing.T) {
 	}
 }
 
+func TestLoginWithToken_DefersLicenseResponseAfterTerminalQueries(t *testing.T) {
+	t.Setenv("JOTTA_TOKEN", "tok")
+	t.Setenv("JOTTA_DEVICE", "dev")
+
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:             promptLicense,
+				PromptSuffix:       queryOSC11 + queryDSR,
+				ExpectQueryReplies: []string{replyDSR},
+				QuietMs:            20,
+				Expect:             "yes",
+			},
+			{Prompt: promptToken, Expect: "tok"},
+			{Prompt: "Device name: ", Expect: "dev"},
+		},
+		FinalOutput: "Login successful.\n",
+	})
+
+	origCLI := jottaCLI
+	jottaCLI = fakeCLIPath
+	defer func() { jottaCLI = origCLI }()
+
+	err := loginWithToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoginWithToken_WaitsForQuietReadBeforeLicenseResponse(t *testing.T) {
+	t.Setenv("JOTTA_TOKEN", "tok")
+	t.Setenv("JOTTA_DEVICE", "dev")
+
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:              promptLicense,
+				PromptSuffix:        queryOSC11 + queryDSR,
+				PromptSuffixDelayMs: 10,
+				ExpectQueryReplies:  []string{replyDSR},
+				QuietMs:             20,
+				Expect:              "yes",
+			},
+			{Prompt: promptToken, Expect: "tok"},
+			{Prompt: "Device name: ", Expect: "dev"},
+		},
+		FinalOutput: "Login successful.\n",
+	})
+
+	origCLI := jottaCLI
+	jottaCLI = fakeCLIPath
+	defer func() { jottaCLI = origCLI }()
+
+	err := loginWithToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- Status pattern matching tests ---
 
 func TestStatusPatternMatching(t *testing.T) {
 	tests := []struct {
-		name    string
-		output  string
-		wantKey string
+		name   string
+		output string
+		want   statusKind
 	}{
 		{
-			name:    "matching device",
-			output:  "Some output\nFound remote device that matches this machine\nMore output",
-			wantKey: "matching_device",
+			name:   "matching device",
+			output: "Some output\nFound remote device that matches this machine\nMore output",
+			want:   statusMatchingDeviceKind,
 		},
 		{
-			name:    "session revoked",
-			output:  "Error: The session has been revoked.\nPlease login again.",
-			wantKey: "session_revoked",
+			name:   "session revoked",
+			output: "Error: The session has been revoked.\nPlease login again.",
+			want:   statusSessionRevokedKind,
 		},
 		{
-			name:    "device name not set",
-			output:  "The device name has not been set\nRun jotta-cli setup",
-			wantKey: "no_device_name",
+			name:   "device name not set",
+			output: "The device name has not been set\nRun jotta-cli setup",
+			want:   statusNoDeviceNameKind,
 		},
 		{
-			name:    "not logged in",
-			output:  "Not logged in\nUse jotta-cli login",
-			wantKey: "not_logged_in",
+			name:   "not logged in",
+			output: "Not logged in\nUse jotta-cli login",
+			want:   statusNotLoggedInKind,
 		},
 		{
-			name:    "device not remote",
-			output:  "ERROR  device [integration-test] does not exist remotely. Jottad cannot continue.",
-			wantKey: "device_not_remote",
+			name:   "device not remote",
+			output: "ERROR  device [integration-test] does not exist remotely. Jottad cannot continue.",
+			want:   statusDeviceMissingKind,
 		},
 		{
-			name:    "unknown status",
-			output:  "Something unexpected happened",
-			wantKey: "",
+			name:   "unknown status",
+			output: "Something unexpected happened",
+			want:   statusUnknown,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := classifyStatus(tt.output)
-			if got != tt.wantKey {
-				t.Errorf("classifyStatus(%q) = %q, want %q", tt.output, got, tt.wantKey)
+			if got != tt.want {
+				t.Errorf("classifyStatus(%q) = %q, want %q", tt.output, got, tt.want)
 			}
 		})
 	}
@@ -450,7 +570,9 @@ func TestForceSymlink_New(t *testing.T) {
 	os.MkdirAll(target, 0755)
 	link := filepath.Join(dir, "link")
 
-	forceSymlink(target, link)
+	if err := forceSymlink(target, link); err != nil {
+		t.Fatal(err)
+	}
 
 	resolved, err := os.Readlink(link)
 	if err != nil {
@@ -470,7 +592,9 @@ func TestForceSymlink_Replace(t *testing.T) {
 	link := filepath.Join(dir, "link")
 
 	os.Symlink(target1, link)
-	forceSymlink(target2, link)
+	if err := forceSymlink(target2, link); err != nil {
+		t.Fatal(err)
+	}
 
 	resolved, err := os.Readlink(link)
 	if err != nil {
@@ -501,21 +625,357 @@ func assertEnv(t *testing.T, key, want string) {
 	}
 }
 
-// classifyStatus extracts from main.go's status matching logic. This is tested
-// separately so the pattern strings can be validated without running jottad.
-func classifyStatus(output string) string {
-	switch {
-	case strings.Contains(output, statusMatchingDevice):
-		return "matching_device"
-	case strings.Contains(output, statusSessionRevoked):
-		return "session_revoked"
-	case strings.Contains(output, statusNoDeviceName):
-		return "no_device_name"
-	case strings.Contains(output, statusNotLoggedIn):
-		return "not_logged_in"
-	case strings.Contains(output, statusDeviceNotRemote):
-		return "device_not_remote"
-	default:
-		return ""
+func TestTerminalResponder_SplitQueriesAcrossReads(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	var responder terminalResponder
+	if got := responder.respond(writer, "\x1b]11;"); got {
+		t.Fatal("unexpected reply for incomplete OSC11 query")
+	}
+	if got := responder.respond(writer, "?\x1b\\hello\x1b["); !got {
+		t.Fatal("expected OSC11 reply after completed split query")
+	}
+	if got := responder.respond(writer, "6n"); !got {
+		t.Fatal("expected DSR reply after completed split query")
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(reply) != replyOSC11+replyDSR {
+		t.Fatalf("terminal replies = %q, want %q", string(reply), replyOSC11+replyDSR)
+	}
+}
+
+func TestWaitForStartup_SessionRevokedLogsOutAndBackIn(t *testing.T) {
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: statusSessionRevoked, err: errors.New("timeout")},
+			{output: "ready", err: nil},
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          envMap("JOTTA_TOKEN", "tok", "JOTTA_DEVICE", "dev"),
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.waitForStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if !runner.called("pty " + cmdKey(jottaCLI, []string{"logout"})) {
+		t.Fatal("expected logout PTY call")
+	}
+	if !runner.called("pty " + cmdKey(jottaCLI, []string{"login"})) {
+		t.Fatal("expected login PTY call")
+	}
+}
+
+func TestWaitForStartup_CanceledContextReturnsNil(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	a := app{
+		runner:          &fakeRunner{},
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.waitForStartup(ctx); err != nil {
+		t.Fatalf("waitForStartup error = %v, want nil", err)
+	}
+}
+
+func TestWaitForStartup_UnknownStatusTimesOutWithDiagnostic(t *testing.T) {
+	t.Setenv("STARTUP_TIMEOUT", "1")
+
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: "still booting", err: errors.New("timeout")},
+		},
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"status"}): {
+				{output: "diagnostic output", err: nil},
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.waitForStartup(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "startup timeout") {
+		t.Fatalf("waitForStartup error = %v, want startup timeout", err)
+	}
+	if !strings.Contains(stdout.String(), "diagnostic output") {
+		t.Fatalf("expected diagnostic output in stdout, got %q", stdout.String())
+	}
+}
+
+func TestEnsureSyncConfigured_ContinuesOnStatusProbeError(t *testing.T) {
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: "daemon busy", err: errors.New("timeout")},
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.ensureSyncConfigured(); err != nil {
+		t.Fatalf("ensureSyncConfigured error = %v, want nil", err)
+	}
+	if runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", "/sync"})) {
+		t.Fatal("did not expect sync setup PTY call")
+	}
+	if !strings.Contains(stdout.String(), "sync status probe failed") {
+		t.Fatalf("expected warning in stdout, got %q", stdout.String())
+	}
+}
+
+func TestEnsureSyncConfigured_SetsUpWhenSyncDisabled(t *testing.T) {
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: statusSyncDisabled, err: errors.New("exit status 1")},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.ensureSyncConfigured(); err != nil {
+		t.Fatalf("ensureSyncConfigured error = %v, want nil", err)
+	}
+	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", "/sync"})) {
+		t.Fatal("expected sync setup PTY call")
+	}
+}
+
+func TestConfigureScanInterval_FailsOnCommandError(t *testing.T) {
+	runner := &fakeRunner{
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1m"}): {
+				{output: "bad config", err: errors.New("exit status 2")},
+			},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          envMap("JOTTA_SCANINTERVAL", "1m"),
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.configureScanInterval()
+	if err == nil || !strings.Contains(err.Error(), "bad config") {
+		t.Fatalf("configureScanInterval error = %v, want command failure", err)
+	}
+}
+
+func TestLoadIgnoreFile_FailsOnCommandError(t *testing.T) {
+	path := writeTempFile(t, "*.tmp\n")
+	runner := &fakeRunner{
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "*.tmp"}): {
+				{output: "nope", err: errors.New("exit status 1")},
+			},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.loadIgnoreFile(path)
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("loadIgnoreFile error = %v, want command failure", err)
+	}
+}
+
+func TestMonitor_ReturnsOnHealthCheckFailure(t *testing.T) {
+	runner := &fakeRunner{
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"status"}): {
+				{output: "status failure", err: errors.New("exit status 1")},
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.monitor(context.Background(), asyncProcess{done: make(chan error)})
+	if err == nil || !strings.Contains(err.Error(), "status health check failed") {
+		t.Fatalf("monitor error = %v, want health-check failure", err)
+	}
+	if !strings.Contains(stdout.String(), "status failure") {
+		t.Fatalf("expected monitor output to include failing status, got %q", stdout.String())
+	}
+}
+
+func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
+	runner := &fakeRunner{
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"status"}): {
+				{output: "ok", err: nil},
+				{output: "ok", err: nil},
+			},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		cancel()
+	}()
+
+	done := make(chan error)
+	close(done)
+	if err := a.monitor(ctx, asyncProcess{done: make(chan error)}); err != nil {
+		t.Fatalf("monitor error = %v, want nil", err)
+	}
+}
+
+type fakeCmdResult struct {
+	output string
+	err    error
+}
+
+type fakeRunner struct {
+	runResults    map[string][]fakeCmdResult
+	statusResults []fakeCmdResult
+	ptyErrors     map[string]error
+	calls         []string
+}
+
+func (r *fakeRunner) Run(name string, args ...string) (string, error) {
+	key := cmdKey(name, args)
+	r.calls = append(r.calls, "run "+key)
+	if len(r.runResults[key]) == 0 {
+		return "", nil
+	}
+	result := r.runResults[key][0]
+	r.runResults[key] = r.runResults[key][1:]
+	return result.output, result.err
+}
+
+func (r *fakeRunner) Start(name string, args []string, stdout, stderr io.Writer) (process, error) {
+	r.calls = append(r.calls, "start "+cmdKey(name, args))
+	return &fakeProcess{}, nil
+}
+
+func (r *fakeRunner) PtyRun(name string, args []string, prompts []prompt, timeout time.Duration) error {
+	key := cmdKey(name, args)
+	r.calls = append(r.calls, "pty "+key)
+	if err, ok := r.ptyErrors[key]; ok {
+		return err
+	}
+	return nil
+}
+
+func (r *fakeRunner) Status(timeout time.Duration) (string, error) {
+	r.calls = append(r.calls, "status")
+	if len(r.statusResults) == 0 {
+		return "", nil
+	}
+	result := r.statusResults[0]
+	r.statusResults = r.statusResults[1:]
+	return result.output, result.err
+}
+
+func (r *fakeRunner) called(want string) bool {
+	for _, call := range r.calls {
+		if call == want {
+			return true
+		}
+	}
+	return false
+}
+
+type fakeProcess struct {
+	waitErr error
+}
+
+func (p *fakeProcess) Wait() error {
+	return p.waitErr
+}
+
+func (p *fakeProcess) Signal(os.Signal) error {
+	return nil
+}
+
+func (p *fakeProcess) Kill() error {
+	return nil
+}
+
+func cmdKey(name string, args []string) string {
+	if len(args) == 0 {
+		return name
+	}
+	return name + " " + strings.Join(args, " ")
+}
+
+func envMap(pairs ...string) func(string) string {
+	values := map[string]string{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		values[pairs[i]] = pairs[i+1]
+	}
+	return func(key string) string {
+		return values[key]
 	}
 }

@@ -4,7 +4,7 @@ This project uses two test layers: **Go unit tests** (deterministic, no network)
 
 ## Go Unit Tests
 
-Unit tests verify the core PTY prompt-matching engine, env file parsing, and helper functions using a fake-cli simulator — no real `jotta-cli` binary required.
+Unit tests verify the PTY prompt-matching engine, terminal-query responder, startup state machine, command-failure handling, env file parsing, and helper functions using a fake-cli simulator plus in-process fakes — no real `jotta-cli` binary required.
 
 ### Running
 
@@ -17,15 +17,17 @@ go test -v -race -timeout 30s ./...
 | Area | Tests | Purpose |
 |------|-------|---------|
 | `ptyRun` | Single/multiple/mutually-exclusive prompts, timeout, partial reads, exit codes | Core prompt-response engine |
+| Terminal queries | Split ANSI query sequences across reads, deferred prompt replies | Covers fragile PTY/TTY negotiation behavior |
 | `loginWithToken` | New device + existing device flows, prompt string regression | Full login flow with exact prompt strings |
-| Status patterns | All 4 status output patterns | Startup state machine classification |
+| Startup loop | Status classification, revoked-session recovery, timeout diagnostics | Deterministic coverage for startup branches |
+| Command failures | Ignore loading, scan-interval config, health-check failures | Ensures setup errors fail loudly instead of looking healthy |
 | `loadEnvFile` | KEY=VALUE, quotes, export, comments, missing file | Env file parser |
 | `envInt` | Set, default, invalid | Integer env helper |
 | `forceSymlink` | New, replace | Symlink helper |
 
 ### How prompt regression detection works
 
-The test file defines all known jotta-cli prompt strings as constants:
+The application defines the known jotta-cli prompt strings as constants in `main.go`, and the tests exercise those exact constants:
 
 ```go
 const (
@@ -40,9 +42,8 @@ const (
 The `TestLoginWithToken_PromptStringsMatch` test runs `loginWithToken()` against a fake-cli that expects **exactly** these prompt strings. If jotta-cli changes a prompt in a future release, this test fails — telling you precisely which string changed.
 
 **To update after a jotta-cli prompt change:**
-1. Update the prompt constant in `main_test.go`
-2. Update the corresponding `prompt{}` struct in `main.go`
-3. Re-run `go test`
+1. Update the prompt constant in `main.go`
+2. Re-run `go test`
 
 ### The fake-cli simulator
 
