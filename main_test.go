@@ -19,13 +19,17 @@ const (
 	promptDeviceName  = "Device name"
 	promptReuseDevice = "Do you want to re-use this device? (yes/no):"
 	promptLogout      = "Backup will stop. Continue?(y/n): "
+	queryOSC11        = "\x1b]11;?\x1b\\"
+	queryDSR          = "\x1b[6n"
+	replyOSC11        = "\x1b]11;rgb:0000/0000/0000\x1b\\"
+	replyDSR          = "\x1b[1;1R"
 
 	// Status output patterns matched in the main() startup loop.
-	statusMatchingDevice   = "Found remote device that matches this machine"
-	statusSessionRevoked   = "Error: The session has been revoked."
-	statusNoDeviceName     = "The device name has not been set"
-	statusNotLoggedIn      = "Not logged in"
-	statusDeviceNotRemote  = "does not exist remotely"
+	statusMatchingDevice  = "Found remote device that matches this machine"
+	statusSessionRevoked  = "Error: The session has been revoked."
+	statusNoDeviceName    = "The device name has not been set"
+	statusNotLoggedIn     = "Not logged in"
+	statusDeviceNotRemote = "does not exist remotely"
 )
 
 var fakeCLIPath string
@@ -57,10 +61,14 @@ func TestMain(m *testing.M) {
 // --- fake-cli scenario helpers ---
 
 type fakeStep struct {
-	Prompt    string `json:"prompt"`
-	Expect    string `json:"expect,omitempty"`
-	DelayMs   int    `json:"delayMs,omitempty"`
-	ChunkSize int    `json:"chunkSize,omitempty"`
+	Prompt              string   `json:"prompt"`
+	PromptSuffix        string   `json:"promptSuffix,omitempty"`
+	PromptSuffixDelayMs int      `json:"promptSuffixDelayMs,omitempty"`
+	Expect              string   `json:"expect,omitempty"`
+	ExpectQueryReplies  []string `json:"expectQueryReplies,omitempty"`
+	QuietMs             int      `json:"quietMs,omitempty"`
+	DelayMs             int      `json:"delayMs,omitempty"`
+	ChunkSize           int      `json:"chunkSize,omitempty"`
 }
 
 type fakeScenario struct {
@@ -254,6 +262,53 @@ func TestPtyRun_CarriageReturnAsEnter(t *testing.T) {
 	}
 }
 
+func TestPtyRun_DefersPromptResponseAfterTerminalQueries(t *testing.T) {
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:             promptLicense,
+				PromptSuffix:       queryOSC11 + queryDSR,
+				ExpectQueryReplies: []string{replyDSR, replyOSC11},
+				QuietMs:            20,
+				Expect:             "yes",
+			},
+		},
+		FinalOutput: "Logged in.\n",
+	})
+
+	err := ptyRun(fakeCLIPath, nil, []prompt{
+		{promptLicense, "yes"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPtyRun_WaitsForQuietReadBeforePromptResponse(t *testing.T) {
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:              promptLicense,
+				PromptSuffix:        queryOSC11 + queryDSR,
+				PromptSuffixDelayMs: 10,
+				ExpectQueryReplies:  []string{replyDSR, replyOSC11},
+				QuietMs:             20,
+				Expect:              "yes",
+			},
+		},
+		FinalOutput: "Logged in.\n",
+	})
+
+	err := ptyRun(fakeCLIPath, nil, []prompt{
+		{promptLicense, "yes"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- loginWithToken tests ---
 
 func TestLoginWithToken_NewDevice(t *testing.T) {
@@ -327,6 +382,67 @@ func TestLoginWithToken_PromptStringsMatch(t *testing.T) {
 	err := loginWithToken()
 	if err != nil {
 		t.Fatalf("loginWithToken failed — prompt strings may have changed: %v", err)
+	}
+}
+
+func TestLoginWithToken_DefersLicenseResponseAfterTerminalQueries(t *testing.T) {
+	t.Setenv("JOTTA_TOKEN", "tok")
+	t.Setenv("JOTTA_DEVICE", "dev")
+
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:             promptLicense,
+				PromptSuffix:       queryOSC11 + queryDSR,
+				ExpectQueryReplies: []string{replyDSR, replyOSC11},
+				QuietMs:            20,
+				Expect:             "yes",
+			},
+			{Prompt: promptToken, Expect: "tok"},
+			{Prompt: "Device name: ", Expect: "dev"},
+		},
+		FinalOutput: "Login successful.\n",
+	})
+
+	origCLI := jottaCLI
+	jottaCLI = fakeCLIPath
+	defer func() { jottaCLI = origCLI }()
+
+	err := loginWithToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoginWithToken_WaitsForQuietReadBeforeLicenseResponse(t *testing.T) {
+	t.Setenv("JOTTA_TOKEN", "tok")
+	t.Setenv("JOTTA_DEVICE", "dev")
+
+	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
+		Steps: []fakeStep{
+			{
+				Prompt:              promptLicense,
+				PromptSuffix:        queryOSC11 + queryDSR,
+				PromptSuffixDelayMs: 10,
+				ExpectQueryReplies:  []string{replyDSR, replyOSC11},
+				QuietMs:             20,
+				Expect:              "yes",
+			},
+			{Prompt: promptToken, Expect: "tok"},
+			{Prompt: "Device name: ", Expect: "dev"},
+		},
+		FinalOutput: "Login successful.\n",
+	})
+
+	origCLI := jottaCLI
+	jottaCLI = fakeCLIPath
+	defer func() { jottaCLI = origCLI }()
+
+	err := loginWithToken()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

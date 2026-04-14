@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -251,33 +250,72 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 	defer ptmx.Close()
 
 	deadline := time.Now().Add(timeout)
+	const terminalQuerySettleDelay = 50 * time.Millisecond
 	buf := make([]byte, 4096)
 	accumulated := ""
 	responded := make([]bool, len(prompts))
-
-	for time.Now().Before(deadline) {
-		ptmx.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, err := ptmx.Read(buf)
-		if n > 0 {
-			chunk := string(buf[:n])
-			fmt.Fprint(ptyOutput, chunk)
-			answerTerminalQueries(ptmx, chunk)
-			accumulated += chunk
-
-			for i, p := range prompts {
-				if !responded[i] && strings.Contains(accumulated, p.match) {
-					ptmx.Write([]byte(p.response + "\r"))
-					responded[i] = true
-					accumulated = ""
-					break
-				}
+	pendingPrompt := -1
+	pendingPromptReadyAt := time.Time{}
+	type readResult struct {
+		chunk string
+		err   error
+	}
+	readCh := make(chan readResult, 16)
+	go func() {
+		for {
+			n, readErr := ptmx.Read(buf)
+			if n > 0 {
+				readCh <- readResult{chunk: string(buf[:n])}
+			}
+			if readErr != nil {
+				readCh <- readResult{err: readErr}
+				close(readCh)
+				return
 			}
 		}
-		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				continue
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	sendPrompt := func(index int) {
+		ptmx.Write([]byte(prompts[index].response + "\r"))
+		responded[index] = true
+		accumulated = ""
+		pendingPrompt = -1
+		pendingPromptReadyAt = time.Time{}
+	}
+
+	for time.Now().Before(deadline) {
+		select {
+		case result, ok := <-readCh:
+			if !ok {
+				return cmd.Wait()
 			}
-			break // EOF or EIO — process exited
+			if result.chunk != "" {
+				fmt.Fprint(ptyOutput, result.chunk)
+				hadTerminalQuery := answerTerminalQueries(ptmx, result.chunk)
+				accumulated += result.chunk
+
+				if pendingPrompt == -1 {
+					for i, p := range prompts {
+						if !responded[i] && strings.Contains(accumulated, p.match) {
+							pendingPrompt = i
+							pendingPromptReadyAt = time.Now().Add(terminalQuerySettleDelay)
+							break
+						}
+					}
+				}
+				if pendingPrompt != -1 && hadTerminalQuery {
+					pendingPromptReadyAt = time.Now().Add(terminalQuerySettleDelay)
+				}
+			}
+			if result.err != nil {
+				return cmd.Wait()
+			}
+		case <-ticker.C:
+			if pendingPrompt != -1 && time.Now().After(pendingPromptReadyAt) {
+				sendPrompt(pendingPrompt)
+			}
 		}
 	}
 
@@ -288,19 +326,23 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 }
 
 // answerTerminalQueries detects ANSI terminal capability queries in PTY output
-// and writes back appropriate responses. jotta-cli sends these queries when
-// running under a PTY and blocks until it receives responses.
-func answerTerminalQueries(ptmx *os.File, chunk string) {
+// and writes back appropriate responses. It reports whether terminal query
+// traffic was present so prompt answers can be deferred to a later quiet pass.
+func answerTerminalQueries(ptmx *os.File, chunk string) bool {
+	var answered bool
 	// DSR (Device Status Report) — cursor position query: \x1b[6n
 	// Respond with cursor at row 1, col 1: \x1b[1;1R
 	if strings.Contains(chunk, "\x1b[6n") {
 		ptmx.Write([]byte("\x1b[1;1R"))
+		answered = true
 	}
 	// OSC 11 — query background color: \x1b]11;?\x1b\\
 	// Respond with black: \x1b]11;rgb:0000/0000/0000\x1b\\
 	if strings.Contains(chunk, "\x1b]11;?") {
 		ptmx.Write([]byte("\x1b]11;rgb:0000/0000/0000\x1b\\"))
+		answered = true
 	}
+	return answered
 }
 
 func run(name string, args ...string) {
