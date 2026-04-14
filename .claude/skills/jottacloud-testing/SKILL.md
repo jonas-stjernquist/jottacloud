@@ -1,7 +1,6 @@
 ---
 name: jottacloud-testing
 description: Guides running the jottacloud Docker integration tests. Use this skill whenever the user asks to run tests, check test results, debug test failures, or work with the integration test suite in this project — including when they say "run tests", "run the tests", "check the logs", or provide a PAT/token for testing.
-user-invocable: true
 ---
 
 # Jottacloud Testing
