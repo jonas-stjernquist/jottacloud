@@ -49,7 +49,7 @@ docker run \
 | `/data/jottad` | Persistent config and state. **Always mount this** to preserve login and backup progress across restarts. |
 | `/backup/` | Backup source. Each subdirectory under `/backup/` is registered via `jotta-cli add`. Mount multiple sources: `-v /home:/backup/home -v /var/data:/backup/data`. |
 | `/sync` | Sync source. Mount a **single** directory here. Only one sync root is supported by jotta-cli. |
-| `/config/ignorefile` | Optional gitignore-style ignore file. Loaded via `jotta-cli ignores set` on startup. |
+| `/config/ignorefile` | Optional gitignore-style ignore file. On startup, each non-comment line is loaded as a separate ignore pattern via `jotta-cli ignores add --pattern <line>`. |
 
 ---
 
