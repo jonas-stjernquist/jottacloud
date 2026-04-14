@@ -183,7 +183,7 @@ func (a app) run(ctx context.Context, args []string) error {
 	defer terminateProcess(tail, shutdownGracePeriod)
 
 	fmt.Fprintln(a.stdout, "Monitoring active.")
-	return a.monitor(ctx, jottad, tail)
+	return a.monitor(ctx, tail)
 }
 
 func (a app) waitForStartup(ctx context.Context) error {
@@ -363,7 +363,7 @@ func (a app) configureScanInterval() error {
 	return err
 }
 
-func (a app) monitor(ctx context.Context, jottad, tail asyncProcess) error {
+func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 	ticker := time.NewTicker(a.monitorInterval)
 	defer ticker.Stop()
 
@@ -433,10 +433,6 @@ func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) 
 		{promptDeviceName, getenv("JOTTA_DEVICE")},
 		{promptReuseDevice, "yes"},
 	}, loginTimeout)
-}
-
-func jottaStatus(timeout time.Duration) (string, error) {
-	return execRunner{}.Status(timeout)
 }
 
 func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration) error {

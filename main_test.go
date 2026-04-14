@@ -851,7 +851,7 @@ func TestMonitor_ReturnsOnHealthCheckFailure(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	err := a.monitor(context.Background(), asyncProcess{done: make(chan error)}, asyncProcess{done: make(chan error)})
+	err := a.monitor(context.Background(), asyncProcess{done: make(chan error)})
 	if err == nil || !strings.Contains(err.Error(), "status health check failed") {
 		t.Fatalf("monitor error = %v, want health-check failure", err)
 	}
@@ -886,7 +886,7 @@ func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
 
 	done := make(chan error)
 	close(done)
-	if err := a.monitor(ctx, asyncProcess{done: done}, asyncProcess{done: make(chan error)}); err != nil {
+	if err := a.monitor(ctx, asyncProcess{done: make(chan error)}); err != nil {
 		t.Fatalf("monitor error = %v, want nil", err)
 	}
 }
