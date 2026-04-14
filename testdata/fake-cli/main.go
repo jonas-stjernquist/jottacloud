@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
+
+	"golang.org/x/term"
 )
 
 type step struct {
@@ -23,9 +23,6 @@ type step struct {
 	DelayMs int `json:"delayMs,omitempty"`
 	// ChunkSize splits the prompt into chunks of this size (simulates partial reads).
 	ChunkSize int `json:"chunkSize,omitempty"`
-	// RawMode reads until \r (carriage return) instead of \n, simulating interactive
-	// CLIs that put stdin in raw mode and treat \r as the Enter key.
-	RawMode bool `json:"rawMode,omitempty"`
 }
 
 type scenario struct {
@@ -34,6 +31,10 @@ type scenario struct {
 	ExitCode    int    `json:"exitCode"`
 	// HangForever causes the process to sleep indefinitely after steps (for timeout tests).
 	HangForever bool `json:"hangForever,omitempty"`
+	// RawMode disables ICRNL/ICANON on stdin so \r is delivered as-is (not converted
+	// to \n), matching interactive CLIs that put stdin in raw mode. When true, all
+	// steps read until \r instead of \n.
+	RawMode bool `json:"rawMode,omitempty"`
 }
 
 func main() {
@@ -51,17 +52,14 @@ func main() {
 
 	reader := bufio.NewReader(os.Stdin)
 
-	// If any step uses raw mode (reads until \r), disable ICRNL now — before
-	// printing the first prompt — so that \r from the PTY master is delivered
-	// as-is instead of being converted to \n. This must happen before ptyRun
-	// can write a response, otherwise the conversion may already have occurred.
-	for _, s := range sc.Steps {
-		if s.RawMode {
-			if err := setRawInputMode(os.Stdin); err != nil {
-				fmt.Fprintf(os.Stderr, "setRawInputMode: %v\n", err)
-				os.Exit(2)
-			}
-			break
+	// If the scenario uses raw mode, put stdin into raw mode before printing
+	// the first prompt so that \r from the PTY master is delivered as-is rather
+	// than being converted to \n. term.MakeRaw is used for portability across
+	// platforms (Linux, macOS, etc.).
+	if sc.RawMode {
+		if _, err := term.MakeRaw(int(os.Stdin.Fd())); err != nil {
+			fmt.Fprintf(os.Stderr, "term.MakeRaw: %v\n", err)
+			os.Exit(2)
 		}
 	}
 
@@ -88,8 +86,8 @@ func main() {
 			line string
 			err  error
 		)
-		if s.RawMode {
-			// ICRNL was disabled at startup, so \r arrives as-is from the master.
+		if sc.RawMode {
+			// ICRNL is disabled, so \r arrives as-is from the master.
 			line, err = reader.ReadString('\r')
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "read error: %v\n", err)
@@ -120,23 +118,4 @@ func main() {
 	}
 
 	os.Exit(sc.ExitCode)
-}
-
-// setRawInputMode disables line-buffering (ICANON) and CR→NL conversion (ICRNL)
-// on f's file descriptor. Together these mirror what interactive CLIs do when
-// they put their stdin into raw mode so that \r is the Enter key and characters
-// are delivered immediately rather than waiting for a newline.
-func setRawInputMode(f *os.File) error {
-	var t syscall.Termios
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&t))); errno != 0 {
-		return errno
-	}
-	t.Iflag &^= syscall.ICRNL  // don't convert \r→\n on input
-	t.Lflag &^= syscall.ICANON // deliver characters immediately, don't buffer lines
-	t.Cc[syscall.VMIN] = 1     // block until at least 1 byte is available
-	t.Cc[syscall.VTIME] = 0    // no read timeout
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&t))); errno != 0 {
-		return errno
-	}
-	return nil
 }

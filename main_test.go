@@ -61,7 +61,6 @@ type fakeStep struct {
 	Expect    string `json:"expect,omitempty"`
 	DelayMs   int    `json:"delayMs,omitempty"`
 	ChunkSize int    `json:"chunkSize,omitempty"`
-	RawMode   bool   `json:"rawMode,omitempty"`
 }
 
 type fakeScenario struct {
@@ -69,6 +68,7 @@ type fakeScenario struct {
 	FinalOutput string     `json:"finalOutput,omitempty"`
 	ExitCode    int        `json:"exitCode"`
 	HangForever bool       `json:"hangForever,omitempty"`
+	RawMode     bool       `json:"rawMode,omitempty"`
 }
 
 func scenarioJSON(t *testing.T, sc fakeScenario) string {
@@ -237,16 +237,17 @@ func TestPtyRun_CarriageReturnAsEnter(t *testing.T) {
 	// to send \n instead of \r, the fake-cli read would never terminate and the
 	// test would time out.
 	setScenarioEnv(t, fakeScenario{
+		RawMode: true,
 		Steps: []fakeStep{
-			{Prompt: "accept license (yes/no): ", Expect: "yes", RawMode: true},
-			{Prompt: "Personal login token: ", Expect: "tok", RawMode: true},
+			{Prompt: promptLicense, Expect: "yes"},
+			{Prompt: promptToken, Expect: "tok"},
 		},
 		FinalOutput: "Logged in.\n",
 	})
 
 	err := ptyRun(fakeCLIPath, nil, []prompt{
-		{"accept license (yes/no): ", "yes"},
-		{"Personal login token: ", "tok"},
+		{promptLicense, "yes"},
+		{promptToken, "tok"},
 	}, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
