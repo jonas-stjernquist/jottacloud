@@ -292,8 +292,12 @@ func (a app) configureSync() error {
 	}
 
 	entries, err := os.ReadDir("/sync")
-	if err != nil || len(entries) == 0 {
-		return err
+	if err != nil {
+		fmt.Fprintf(a.stdout, "Warning: unable to read /sync, skipping sync setup: %v\n", err)
+		return nil
+	}
+	if len(entries) == 0 {
+		return nil
 	}
 
 	fmt.Fprintln(a.stdout, "Adding sync directory.")
