@@ -460,28 +460,32 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 		err   error
 	}
 	readCh := make(chan readResult, 16)
-	go func() {
-		for {
-			n, readErr := ptmx.Read(buf)
-			if n > 0 {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	go func() {
 		defer close(readCh)
+		sendResult := func(result readResult) bool {
+			select {
+			case readCh <- result:
+				return true
+			case <-stopCh:
+				return false
+			}
+		}
+
 		for {
 			n, readErr := ptmx.Read(buf)
 			if n > 0 {
-				select {
-				case readCh <- readResult{chunk: string(buf[:n])}:
-				case <-stopCh:
+				if !sendResult(readResult{chunk: string(buf[:n])}) {
 					return
 				}
 			}
 			if readErr != nil {
-				select {
-				case readCh <- readResult{err: readErr}:
-				case <-stopCh:
-				}
+				_ = sendResult(readResult{err: readErr})
+				return
+			}
+		}
+	}()
 
 	ticker := time.NewTicker(readPollInterval)
 	defer ticker.Stop()
