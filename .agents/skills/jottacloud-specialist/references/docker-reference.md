@@ -29,6 +29,7 @@ docker run \
 | `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only — credentials are saved to the `/data/jottad` volume after that. |
 | `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. Identifies which machine the backup belongs to. |
 | `JOTTA_SCANINTERVAL` | `12h` | How often to scan for changes. Examples: `1h`, `30m`, `0` (realtime). |
+| `JOTTA_MONITOR_INTERVAL_SECONDS` | `15` | Seconds between background `jotta-cli status` health probes. |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
 | `STARTUP_TIMEOUT` | `15` | Seconds to wait for jottad to start before exiting with an error. |
 | `JOTTAD_SYSTEMD` | `0` | Controls whether jottad attempts systemd integration (sd_notify, socket activation). Must be `0` inside Docker — containers don't run systemd. Set to `1` only when running jottad directly on a host with systemd. |
@@ -121,6 +122,21 @@ jottad normally expects systemd, which doesn't exist in a container. This image 
 5. Set env vars: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
 6. `JOTTA_TOKEN` only needed on first start — credentials persist in `/data/jottad`.
 
+### Recommended Synology ignore file
+
+If your NAS shares contain Synology metadata folders, mount an ignore file to `/config/ignorefile` with:
+
+```text
+**/@eaDir
+**/@eaDir/**
+**/@tmp
+**/@tmp/**
+**/#recycle
+**/#recycle/**
+```
+
+This keeps `jottad` from scanning and uploading Synology-managed metadata trees.
+
 ---
 
 ## Debugging
@@ -161,7 +177,9 @@ The container uses a custom Go entrypoint (`main.go`) instead of a shell script.
 7. Sets up `/sync` as sync root (if mounted and non-empty)
 8. Loads `/config/ignorefile` (if present)
 9. Sets `scaninterval` from `JOTTA_SCANINTERVAL`
-10. Runs `jotta-cli tail` to stream logs, then health-checks every 15s
+10. Runs `jotta-cli tail` to stream logs, then health-checks via `jotta-cli status`
+
+For production troubleshooting, prefer `docker exec jottacloud jotta-cli status` or `docker logs -f jottacloud` over repeatedly running CLI commands in a long-lived interactive shell while a large scan is in progress.
 
 Passing `bash` as the container command (`docker run -it ... bash`) drops straight to a shell, bypassing all of the above.
 

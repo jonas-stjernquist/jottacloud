@@ -26,6 +26,7 @@ docker run \
 | `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login. Use a persistent volume on `/data/jottad` to preserve login state. |
 | `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. Identifies which machine the backup belongs to. |
 | `JOTTA_SCANINTERVAL` | `12h` | How often to scan for changes. Examples: `1h`, `30m`, `0` (realtime). |
+| `JOTTA_MONITOR_INTERVAL_SECONDS` | `15` | Seconds between background `jotta-cli status` health probes. |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
 | `STARTUP_TIMEOUT` | `15` | Seconds to wait for jottad to start before failing. |
 | `JOTTAD_SYSTEMD` | `0` | Controls whether the `jottad` daemon attempts systemd integration (sd_notify, socket activation). Set to `0` in this image since Docker containers don't run systemd. Set to `1` only if running `jottad` directly on a host with systemd. |
@@ -44,7 +45,7 @@ docker run \
 | `/data/jottad` | Persistent config and state. **Mount this to preserve login and backup progress across restarts.** |
 | `/backup/` | Backup source. Each subdirectory is registered via `jotta-cli add`, e.g. `-v /home:/backup/home`. |
 | `/sync` | Sync source. Mount a **single** directory here, e.g. `-v /photos:/sync`. Only one sync root is supported by `jotta-cli`. |
-| `/config/ignorefile` | Optional gitignore-style file for excluding paths from backup. |
+| `/config/ignorefile` | Optional gitignore-style file for excluding paths from backup. Each non-comment line is loaded with `jotta-cli ignores add --pattern ...`. |
 
 ### Backup vs. Sync
 
@@ -116,18 +117,32 @@ The image also handles a common compatibility problem: `jottad` normally expects
 5. **Set environment variables**: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
 6. `JOTTA_TOKEN` is only required on the **first start**. Once logged in, credentials are saved to the `/data/jottad` volume and the token is no longer needed.
 
+### Recommended Synology Ignore File
+
+Synology creates metadata and recycle folders that should usually not be backed up. If those trees are mounted under `/backup`, add an ignore file and mount it to `/config/ignorefile`:
+
+```text
+**/@eaDir
+**/@eaDir/**
+**/@tmp
+**/@tmp/**
+**/#recycle
+**/#recycle/**
+```
+
+This avoids wasting scan time and upload bandwidth on Synology-managed metadata.
+
 ## Debugging
 
 ```bash
-# Start a shell inside the container
-docker run -it stjernquist/jottacloud bash
-
 # Shell into a running container
 docker exec -it jottacloud bash
 
 # Check status
 docker exec jottacloud jotta-cli status
 ```
+
+For production troubleshooting, prefer one-off commands like `docker exec jottacloud jotta-cli status` or `docker logs -f jottacloud`. Long-lived interactive shells are fine for inspection, but repeatedly running `jotta-cli` commands during heavy scans can add avoidable load while `jottad` is already busy.
 
 ## Automated Updates
 
@@ -152,4 +167,3 @@ To set up automated rebuilds in your own fork, add these GitHub repository secre
 - **No recommended packages:** `--no-install-recommends` keeps dependencies minimal
 - **Weekly rebuilds:** automated CI ensures OS and CLI stay patched
 - **Docker secrets support:** avoid passing tokens via environment variables in production
-

@@ -887,7 +887,7 @@ func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
 
 	done := make(chan error)
 	close(done)
-	if err := a.monitor(ctx, asyncProcess{done: make(chan error)}); err != nil {
+	if err := a.monitor(ctx, asyncProcess{done: done}); err != nil {
 		t.Fatalf("monitor error = %v, want nil", err)
 	}
 }
