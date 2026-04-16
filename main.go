@@ -369,7 +369,6 @@ func (a app) configureScanInterval() error {
 }
 
 func (a app) monitor(ctx context.Context, tail asyncProcess) error {
-	a.configureMonitor()
 	ticker := time.NewTicker(a.monitorInterval)
 	defer ticker.Stop()
 

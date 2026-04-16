@@ -875,7 +875,7 @@ func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
 		stdout:          io.Discard,
 		stderr:          io.Discard,
 		sleep:           func(time.Duration) {},
-		getenv:          os.Getenv,
+		getenv:          envMap(),
 		monitorInterval: time.Millisecond,
 	}
 
