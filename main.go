@@ -19,40 +19,40 @@ import (
 )
 
 const (
-	dataDir              = "/data/jottad"
-	configDir            = "/data/jotta-cli"
-	ignoreFilePath       = "/config/ignorefile"
-	secretTokenPath      = "/run/secrets/jotta_token"
-	localtimeRoot        = "/usr/share/zoneinfo"
-	startupProbeTimeout  = time.Second
-	syncStatusTimeout    = 5 * time.Second
-	loginTimeout         = 20 * time.Second
-	logoutTimeout        = 20 * time.Second
-	devicePromptTimeout  = 10 * time.Second
-	syncSetupTimeout     = 30 * time.Second
-	monitorInterval      = 15 * time.Second
-	setupSettlingDelay   = 3 * time.Second
-	shutdownGracePeriod  = 5 * time.Second
-	terminalSettleDelay  = 50 * time.Millisecond
-	readPollInterval     = 10 * time.Millisecond
-	promptLicense        = "accept license (yes/no): "
-	promptToken          = "Personal login token: "
-	promptDeviceName     = "Device name"
-	promptReuseDevice    = "Do you want to re-use this device? (yes/no):"
-	promptLogout         = "Backup will stop. Continue?(y/n): "
-	promptSyncContinue   = "Continue sync setup? [yes]:"
-	promptSyncErrors     = "Chose the error reporting mode for sync:"
-	promptSelectiveSync  = "Do you want to setup selective sync? (y/n):"
-	statusMatchingDevice = "Found remote device that matches this machine"
-	statusSessionRevoked = "Error: The session has been revoked."
-	statusNoDeviceName   = "The device name has not been set"
-	statusNotLoggedIn    = "Not logged in"
-	statusDeviceMissing  = "does not exist remotely"
-	statusSyncDisabled   = "Sync is not enabled"
-	queryDSR             = "\x1b[6n"
-	queryOSC11           = "\x1b]11;?\x1b\\"
-	replyDSR             = "\x1b[1;1R"
-	replyOSC11           = "\x1b]11;rgb:0000/0000/0000\x1b\\"
+	dataDir                = "/data/jottad"
+	configDir              = "/data/jotta-cli"
+	ignoreFilePath         = "/config/ignorefile"
+	secretTokenPath        = "/run/secrets/jotta_token"
+	localtimeRoot          = "/usr/share/zoneinfo"
+	startupProbeTimeout    = time.Second
+	syncStatusTimeout      = 5 * time.Second
+	loginTimeout           = 20 * time.Second
+	logoutTimeout          = 20 * time.Second
+	devicePromptTimeout    = 10 * time.Second
+	syncSetupTimeout       = 30 * time.Second
+	defaultMonitorInterval = 15 * time.Second
+	setupSettlingDelay     = 3 * time.Second
+	shutdownGracePeriod    = 5 * time.Second
+	terminalSettleDelay    = 50 * time.Millisecond
+	readPollInterval       = 10 * time.Millisecond
+	promptLicense          = "accept license (yes/no): "
+	promptToken            = "Personal login token: "
+	promptDeviceName       = "Device name"
+	promptReuseDevice      = "Do you want to re-use this device? (yes/no):"
+	promptLogout           = "Backup will stop. Continue?(y/n): "
+	promptSyncContinue     = "Continue sync setup? [yes]:"
+	promptSyncErrors       = "Chose the error reporting mode for sync:"
+	promptSelectiveSync    = "Do you want to setup selective sync? (y/n):"
+	statusMatchingDevice   = "Found remote device that matches this machine"
+	statusSessionRevoked   = "Error: The session has been revoked."
+	statusNoDeviceName     = "The device name has not been set"
+	statusNotLoggedIn      = "Not logged in"
+	statusDeviceMissing    = "does not exist remotely"
+	statusSyncDisabled     = "Sync is not enabled"
+	queryDSR               = "\x1b[6n"
+	queryOSC11             = "\x1b]11;?\x1b\\"
+	replyDSR               = "\x1b[1;1R"
+	replyOSC11             = "\x1b]11;rgb:0000/0000/0000\x1b\\"
 )
 
 var (
@@ -124,7 +124,7 @@ func main() {
 		stderr:          os.Stderr,
 		sleep:           time.Sleep,
 		getenv:          os.Getenv,
-		monitorInterval: monitorInterval,
+		monitorInterval: defaultMonitorInterval,
 	}
 
 	if err := a.run(ctx, os.Args[1:]); err != nil {
@@ -135,6 +135,7 @@ func main() {
 
 func (a app) run(ctx context.Context, args []string) error {
 	loadEnvFile(filepath.Join(dataDir, "jottad.env"))
+	a.configureMonitor()
 
 	if token, err := os.ReadFile(secretTokenPath); err == nil {
 		os.Setenv("JOTTA_TOKEN", strings.TrimSpace(string(token)))
@@ -399,6 +400,14 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 				return fmt.Errorf("status health check failed: %w", err)
 			}
 		}
+	}
+}
+
+func (a *app) configureMonitor() {
+	a.monitorInterval = envDurationSecondsFrom(a.getenv, "JOTTA_MONITOR_INTERVAL_SECONDS", a.monitorInterval)
+
+	if a.monitorInterval <= 0 {
+		a.monitorInterval = defaultMonitorInterval
 	}
 }
 
@@ -826,10 +835,26 @@ func forceSymlink(target, link string) error {
 }
 
 func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
+	return envIntFrom(os.Getenv, key, def)
+}
+
+func envIntFrom(getenv func(string) string, key string, def int) int {
+	if v := getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
 	}
 	return def
+}
+
+func envDurationSecondsFrom(getenv func(string) string, key string, def time.Duration) time.Duration {
+	v := getenv(key)
+	if v == "" {
+		return def
+	}
+	seconds, err := strconv.Atoi(v)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
