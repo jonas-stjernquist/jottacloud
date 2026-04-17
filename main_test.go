@@ -167,12 +167,13 @@ func TestPtyRun_Timeout(t *testing.T) {
 	err := ptyRun(fakeCLIPath, nil, nil, 500*time.Millisecond)
 	elapsed := time.Since(start)
 
-	// Should return an error (killed process).
 	if err == nil {
 		t.Fatal("expected error from timeout, got nil")
 	}
-	// Should complete in roughly the timeout duration.
-	if elapsed > 3*time.Second {
+	if !errors.Is(err, errPtyTimeout) {
+		t.Fatalf("expected errPtyTimeout, got %v", err)
+	}
+	if elapsed > 2*time.Second {
 		t.Fatalf("took too long: %v", elapsed)
 	}
 }
@@ -563,6 +564,31 @@ func TestEnvInt_InvalidNumber(t *testing.T) {
 	}
 }
 
+// --- envDurationSecondsFrom tests ---
+
+func TestEnvDurationSecondsFrom(t *testing.T) {
+	tests := []struct {
+		name string
+		val  string
+		def  time.Duration
+		want time.Duration
+	}{
+		{"unset", "", 5 * time.Second, 5 * time.Second},
+		{"valid", "30", 5 * time.Second, 30 * time.Second},
+		{"zero returns default", "0", 5 * time.Second, 5 * time.Second},
+		{"negative returns default", "-5", 5 * time.Second, 5 * time.Second},
+		{"invalid returns default", "abc", 7 * time.Second, 7 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getenv := func(string) string { return tt.val }
+			if got := envDurationSecondsFrom(getenv, "KEY", tt.def); got != tt.want {
+				t.Errorf("envDurationSecondsFrom = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- forceSymlink tests ---
 
 func TestForceSymlink_New(t *testing.T) {
@@ -604,6 +630,145 @@ func TestForceSymlink_Replace(t *testing.T) {
 	if resolved != target2 {
 		t.Errorf("symlink points to %q, want %q", resolved, target2)
 	}
+}
+
+func TestForceSymlink_RefusesExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	os.MkdirAll(target, 0755)
+	link := filepath.Join(dir, "link")
+	os.MkdirAll(link, 0755)
+
+	err := forceSymlink(target, link)
+	if err == nil {
+		t.Fatal("expected error when link path is an existing directory")
+	}
+	if !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestForceSymlink_ReplacesRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	os.MkdirAll(target, 0755)
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(link, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := forceSymlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != target {
+		t.Errorf("symlink points to %q, want %q", resolved, target)
+	}
+}
+
+// --- configureLocaltime tests ---
+
+func TestConfigureLocaltime_Empty(t *testing.T) {
+	if err := configureLocaltime(""); err != nil {
+		t.Fatalf("empty localtime should be no-op, got %v", err)
+	}
+}
+
+func TestConfigureLocaltime_TraversalRejected(t *testing.T) {
+	err := configureLocaltime("../etc/passwd")
+	if err == nil || !strings.Contains(err.Error(), "invalid LOCALTIME") {
+		t.Fatalf("expected invalid LOCALTIME error, got %v", err)
+	}
+}
+
+func TestConfigureLocaltime_MissingZone(t *testing.T) {
+	err := configureLocaltime("Nowhere/Nope")
+	if err == nil || !strings.Contains(err.Error(), "invalid LOCALTIME") {
+		t.Fatalf("expected invalid LOCALTIME error, got %v", err)
+	}
+}
+
+// --- loginWithToken missing-env tests ---
+
+func TestLoginWithTokenWithRunner_MissingToken(t *testing.T) {
+	runner := &fakeRunner{}
+	err := loginWithTokenWithRunner(runner, envMap("JOTTA_DEVICE", "dev"))
+	if err == nil || !strings.Contains(err.Error(), "JOTTA_TOKEN") {
+		t.Fatalf("expected missing JOTTA_TOKEN error, got %v", err)
+	}
+}
+
+func TestLoginWithTokenWithRunner_MissingDevice(t *testing.T) {
+	runner := &fakeRunner{}
+	err := loginWithTokenWithRunner(runner, envMap("JOTTA_TOKEN", "tok"))
+	if err == nil || !strings.Contains(err.Error(), "JOTTA_DEVICE") {
+		t.Fatalf("expected missing JOTTA_DEVICE error, got %v", err)
+	}
+}
+
+// --- terminateProcess tests ---
+
+func TestTerminateProcess_SignalsAndExits(t *testing.T) {
+	done := make(chan error, 1)
+	p := &signalingProcess{
+		onSignal: func() { done <- nil; close(done) },
+	}
+
+	terminateProcess(asyncProcess{proc: p, done: done}, time.Second)
+	if p.sigCount != 1 {
+		t.Fatalf("expected one SIGTERM, got %d", p.sigCount)
+	}
+	if p.killed {
+		t.Fatal("did not expect Kill when process exits gracefully")
+	}
+}
+
+func TestTerminateProcess_EscalatesToKillOnTimeout(t *testing.T) {
+	done := make(chan error, 1)
+	p := &signalingProcess{
+		onKill: func() { done <- nil; close(done) },
+	}
+
+	terminateProcess(asyncProcess{proc: p, done: done}, 20*time.Millisecond)
+	if !p.killed {
+		t.Fatal("expected Kill after grace period elapsed")
+	}
+}
+
+func TestTerminateProcess_AlreadyExited(t *testing.T) {
+	done := make(chan error, 1)
+	close(done)
+	p := &signalingProcess{}
+	terminateProcess(asyncProcess{proc: p, done: done}, time.Second)
+	if p.sigCount != 0 || p.killed {
+		t.Fatal("should not signal an already-exited process")
+	}
+}
+
+type signalingProcess struct {
+	sigCount int
+	killed   bool
+	onSignal func()
+	onKill   func()
+}
+
+func (p *signalingProcess) Wait() error { return nil }
+func (p *signalingProcess) Signal(os.Signal) error {
+	p.sigCount++
+	if p.onSignal != nil {
+		p.onSignal()
+	}
+	return nil
+}
+func (p *signalingProcess) Kill() error {
+	p.killed = true
+	if p.onKill != nil {
+		p.onKill()
+	}
+	return nil
 }
 
 // --- helpers ---
@@ -807,6 +972,60 @@ func TestConfigureScanInterval_FailsOnCommandError(t *testing.T) {
 	err := a.configureScanInterval()
 	if err == nil || !strings.Contains(err.Error(), "bad config") {
 		t.Fatalf("configureScanInterval error = %v, want command failure", err)
+	}
+}
+
+func TestConfigureBackups_SkipsAlreadyAdded(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(dir, "backup", "already")
+	os.MkdirAll(backupDir, 0755)
+
+	runner := &fakeRunner{
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"add", backupDir}): {
+				{output: "path already added to backup", err: errors.New("exit status 1")},
+			},
+		},
+	}
+	slept := false
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) { slept = true },
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.configureBackupsIn(filepath.Join(dir, "backup", "*")); err != nil {
+		t.Fatalf("configureBackups error = %v, want nil", err)
+	}
+	if slept {
+		t.Fatal("should not sleep when no new directories were added")
+	}
+}
+
+func TestConfigureBackups_NewDirTriggersSettle(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(dir, "backup", "new")
+	os.MkdirAll(backupDir, 0755)
+
+	runner := &fakeRunner{}
+	slept := false
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) { slept = true },
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.configureBackupsIn(filepath.Join(dir, "backup", "*")); err != nil {
+		t.Fatalf("configureBackups error = %v, want nil", err)
+	}
+	if !slept {
+		t.Fatal("expected settle delay after adding a new directory")
 	}
 }
 
