@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,10 +20,11 @@ import (
 )
 
 const (
-	dataDir                = "/data/jottad"
-	configDir              = "/data/jotta-cli"
-	ignoreFilePath         = "/config/ignorefile"
-	secretTokenPath        = "/run/secrets/jotta_token"
+	dataDir         = "/data/jottad"
+	configDir       = "/data/jotta-cli"
+	ignoreFilePath  = "/config/ignorefile"
+	configFilePath  = "/config/jotta-config.env"
+	secretTokenPath = "/run/secrets/jotta_token"
 	localtimeRoot          = "/usr/share/zoneinfo"
 	startupProbeTimeout    = time.Second
 	syncStatusTimeout      = 5 * time.Second
@@ -62,6 +64,37 @@ var (
 
 	errPtyTimeout    = errors.New("pty timeout")
 	errStatusTimeout = errors.New("status timeout")
+
+	// managedIgnoreStatePath and managedConfigStatePath are vars so tests can
+	// override them to use temporary directories.
+	managedIgnoreStatePath = "/data/jottad/managed-ignores.state"
+	managedConfigStatePath = "/data/jottad/managed-config.state"
+
+	defaultIgnorePatterns = []string{
+		"**/@eaDir",
+		"**/@eaDir/**",
+		"**/@tmp",
+		"**/@tmp/**",
+		"**/#recycle",
+		"**/#recycle/**",
+	}
+
+	managedConfigDefaults = map[string]string{
+		"downloadrate":          "0",
+		"uploadrate":            "0",
+		"checksumreadrate":      "52m",
+		"checksumthreads":       "2",
+		"ignorehiddenfiles":     "false",
+		"maxuploads":            "6",
+		"maxdownloads":          "6",
+		"scaninterval":          "1h0m0s",
+		"webhookstatusinterval": "6h0m0s",
+		"logscanignores":        "false",
+		"slowmomode":            "0",
+		"logtransfers":          "false",
+		"screenshotscapture":    "false",
+		"syncpaused":            "false",
+	}
 )
 
 type prompt struct {
@@ -105,6 +138,7 @@ type app struct {
 	stderr          io.Writer
 	sleep           func(time.Duration)
 	getenv          func(string) string
+	environ         func() []string
 	setenv          func(string, string) error
 	monitorInterval time.Duration
 }
@@ -129,6 +163,7 @@ func main() {
 		stderr:          os.Stderr,
 		sleep:           time.Sleep,
 		getenv:          os.Getenv,
+		environ:         os.Environ,
 		setenv:          os.Setenv,
 		monitorInterval: defaultMonitorInterval,
 	}
@@ -186,10 +221,10 @@ func (a app) run(ctx context.Context, args []string) error {
 	if err := a.configureSync(); err != nil {
 		return err
 	}
-	if err := a.loadIgnoreFile(ignoreFilePath); err != nil {
+	if err := a.applyManagedIgnores(); err != nil {
 		return err
 	}
-	if err := a.configureScanInterval(); err != nil {
+	if err := a.applyManagedConfig(); err != nil {
 		return err
 	}
 
@@ -355,42 +390,119 @@ func (a app) ensureSyncConfigured() error {
 	return nil
 }
 
-func (a app) loadIgnoreFile(path string) error {
-	if _, err := os.Stat(path); err != nil {
-		return nil
-	}
-
-	fmt.Fprintln(a.stdout, "Loading ignore file.")
-	f, err := os.Open(path)
+func (a app) applyManagedIgnores() error {
+	desired, err := a.desiredIgnorePatterns()
 	if err != nil {
-		return fmt.Errorf("open ignore file: %w", err)
+		return err
 	}
-	defer f.Close()
+	previous, err := readStateLines(managedIgnoreStatePath)
+	if err != nil {
+		return err
+	}
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if _, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", line); err != nil {
+	for _, pattern := range subtractStrings(previous, desired) {
+		if _, err := a.runChecked(jottaCLI, "ignores", "rem", "--pattern", pattern); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				continue
+			}
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read ignore file: %w", err)
+	for _, pattern := range subtractStrings(desired, previous) {
+		if _, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", pattern); err != nil {
+			if strings.Contains(err.Error(), "already") {
+				continue
+			}
+			return err
+		}
 	}
-	return nil
+
+	return writeStateLines(managedIgnoreStatePath, desired)
 }
 
-func (a app) configureScanInterval() error {
-	scanInterval := a.getenv("JOTTA_SCANINTERVAL")
-	if scanInterval == "" {
-		return nil
+func (a app) desiredIgnorePatterns() ([]string, error) {
+	filePath := strings.TrimSpace(a.getenv("JOTTA_IGNORE_FILE"))
+	if filePath == "" {
+		filePath = ignoreFilePath
 	}
 
-	fmt.Fprintf(a.stdout, "Setting scan interval to %s.\n", scanInterval)
-	_, err := a.runChecked(jottaCLI, "config", "set", "scaninterval", scanInterval)
+	desired := append([]string{}, defaultIgnorePatterns...)
+	patternsFromFile, err := readIgnoreFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	desired = append(desired, patternsFromFile...)
+	if inline := strings.TrimSpace(a.getenv("JOTTA_IGNORE_PATTERNS")); inline != "" {
+		desired = append(desired, parsePatternList(inline)...)
+	}
+	return uniqueSorted(desired), nil
+}
+
+func (a app) applyManagedConfig() error {
+	desired, err := a.desiredConfigSettings()
+	if err != nil {
+		return err
+	}
+	previous, err := readStateMap(managedConfigStatePath)
+	if err != nil {
+		return err
+	}
+
+	desiredKeys := make([]string, 0, len(desired))
+	for key := range desired {
+		desiredKeys = append(desiredKeys, key)
+	}
+	sort.Strings(desiredKeys)
+	for _, key := range desiredKeys {
+		if err := a.setConfigValue(key, desired[key]); err != nil {
+			return err
+		}
+	}
+
+	resetKeys := make([]string, 0, len(previous))
+	for key := range previous {
+		if _, stillManaged := desired[key]; !stillManaged {
+			resetKeys = append(resetKeys, key)
+		}
+	}
+	sort.Strings(resetKeys)
+	for _, key := range resetKeys {
+		defaultValue, hasDefault := managedConfigDefaults[key]
+		if !hasDefault {
+			fmt.Fprintf(a.stdout, "Warning: cannot reset %s automatically (unknown default), leaving current value unchanged.\n", key)
+			continue
+		}
+		if err := a.setConfigValue(key, defaultValue); err != nil {
+			return err
+		}
+	}
+
+	return writeStateMap(managedConfigStatePath, desired)
+}
+
+func (a app) desiredConfigSettings() (map[string]string, error) {
+	filePath := strings.TrimSpace(a.getenv("JOTTA_CONFIG_FILE"))
+	if filePath == "" {
+		filePath = configFilePath
+	}
+
+	desired, err := readConfigFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	var environment []string
+	if a.environ != nil {
+		environment = a.environ()
+	}
+	for key, value := range parseConfigEnvOverrides(environment) {
+		desired[key] = value
+	}
+	return desired, nil
+}
+
+func (a app) setConfigValue(key, value string) error {
+	fmt.Fprintf(a.stdout, "Setting config %s=%s.\n", key, value)
+	_, err := a.runChecked(jottaCLI, "config", "set", key, value)
 	return err
 }
 
@@ -908,4 +1020,239 @@ func envDurationSecondsFrom(getenv func(string) string, key string, def time.Dur
 		return def
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func parsePatternList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n'
+	})
+	var patterns []string
+	for _, field := range fields {
+		trimmed := strings.TrimSpace(field)
+		if trimmed == "" {
+			continue
+		}
+		patterns = append(patterns, trimmed)
+	}
+	return patterns
+}
+
+func readIgnoreFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open ignore file: %w", err)
+	}
+	defer f.Close()
+
+	var patterns []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read ignore file: %w", err)
+	}
+	return patterns, nil
+}
+
+func readConfigFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("open config file: %w", err)
+	}
+	defer f.Close()
+
+	config := map[string]string{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := normalizeConfigKey(parts[0])
+		value := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if key == "" || value == "" {
+			continue
+		}
+		config[key] = value
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read config file: %w", err)
+	}
+	return config, nil
+}
+
+func parseConfigEnvOverrides(environ []string) map[string]string {
+	config := map[string]string{}
+	for _, entry := range environ {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		value := strings.TrimSpace(parts[1])
+		if value == "" {
+			continue
+		}
+		if !strings.HasPrefix(key, "JOTTA_CONFIG_") || key == "JOTTA_CONFIG_FILE" {
+			continue
+		}
+		normalized := normalizeConfigKey(strings.TrimPrefix(key, "JOTTA_CONFIG_"))
+		if normalized == "" {
+			continue
+		}
+		config[normalized] = value
+	}
+	return config
+}
+
+func normalizeConfigKey(key string) string {
+	key = strings.TrimSpace(strings.ToLower(key))
+	key = strings.ReplaceAll(key, "_", "")
+	return key
+}
+
+func uniqueSorted(values []string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func subtractStrings(source, remove []string) []string {
+	removeSet := map[string]struct{}{}
+	for _, value := range remove {
+		removeSet[value] = struct{}{}
+	}
+	var out []string
+	for _, value := range source {
+		if _, exists := removeSet[value]; exists {
+			continue
+		}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func readStateLines(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open state file: %w", err)
+	}
+	defer f.Close()
+
+	var values []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			values = append(values, line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read state file: %w", err)
+	}
+	return uniqueSorted(values), nil
+}
+
+func writeStateLines(path string, values []string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("prepare state dir: %w", err)
+	}
+	content := ""
+	if len(values) > 0 {
+		content = strings.Join(uniqueSorted(values), "\n") + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write state file: %w", err)
+	}
+	return nil
+}
+
+func readStateMap(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("open state file: %w", err)
+	}
+	defer f.Close()
+
+	values := map[string]string{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := normalizeConfigKey(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if key == "" || value == "" {
+			continue
+		}
+		values[key] = value
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read state file: %w", err)
+	}
+	return values, nil
+}
+
+func writeStateMap(path string, values map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("prepare state dir: %w", err)
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, key+"="+values[key])
+	}
+
+	content := ""
+	if len(lines) > 0 {
+		content = strings.Join(lines, "\n") + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write state file: %w", err)
+	}
+	return nil
 }

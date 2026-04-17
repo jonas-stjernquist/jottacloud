@@ -791,6 +791,15 @@ func assertEnv(t *testing.T, key, want string) {
 	}
 }
 
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTerminalResponder_SplitQueriesAcrossReads(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -952,7 +961,7 @@ func TestEnsureSyncConfigured_SetsUpWhenSyncDisabled(t *testing.T) {
 	}
 }
 
-func TestConfigureScanInterval_FailsOnCommandError(t *testing.T) {
+func TestApplyManagedConfig_FailsOnCommandError(t *testing.T) {
 	runner := &fakeRunner{
 		runResults: map[string][]fakeCmdResult{
 			cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1m"}): {
@@ -960,18 +969,24 @@ func TestConfigureScanInterval_FailsOnCommandError(t *testing.T) {
 			},
 		},
 	}
+	tmpDir := t.TempDir()
+	oldPath := managedConfigStatePath
+	managedConfigStatePath = filepath.Join(tmpDir, "managed-config.state")
+	t.Cleanup(func() { managedConfigStatePath = oldPath })
+
 	a := app{
 		runner:          runner,
 		stdout:          io.Discard,
 		stderr:          io.Discard,
 		sleep:           func(time.Duration) {},
-		getenv:          envMap("JOTTA_SCANINTERVAL", "1m"),
+		getenv:          func(string) string { return "" },
+		environ:         func() []string { return []string{"JOTTA_CONFIG_SCANINTERVAL=1m"} },
 		monitorInterval: time.Millisecond,
 	}
 
-	err := a.configureScanInterval()
+	err := a.applyManagedConfig()
 	if err == nil || !strings.Contains(err.Error(), "bad config") {
-		t.Fatalf("configureScanInterval error = %v, want command failure", err)
+		t.Fatalf("applyManagedConfig error = %v, want command failure", err)
 	}
 }
 
@@ -1029,27 +1044,84 @@ func TestConfigureBackups_NewDirTriggersSettle(t *testing.T) {
 	}
 }
 
-func TestLoadIgnoreFile_FailsOnCommandError(t *testing.T) {
-	path := writeTempFile(t, "*.tmp\n")
-	runner := &fakeRunner{
-		runResults: map[string][]fakeCmdResult{
-			cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "*.tmp"}): {
-				{output: "nope", err: errors.New("exit status 1")},
-			},
-		},
-	}
+func TestDesiredIgnorePatterns_DefaultSynologyPatterns(t *testing.T) {
 	a := app{
-		runner:          runner,
-		stdout:          io.Discard,
-		stderr:          io.Discard,
-		sleep:           func(time.Duration) {},
-		getenv:          os.Getenv,
-		monitorInterval: time.Millisecond,
+		getenv: func(string) string { return "" },
 	}
 
-	err := a.loadIgnoreFile(path)
-	if err == nil || !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("loadIgnoreFile error = %v, want command failure", err)
+	patterns, err := a.desiredIgnorePatterns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range defaultIgnorePatterns {
+		if !containsString(patterns, want) {
+			t.Fatalf("desiredIgnorePatterns missing default %q", want)
+		}
+	}
+}
+
+func TestDesiredConfigSettings_MergesFileAndEnvOverrides(t *testing.T) {
+	cfg := writeTempFile(t, "maxuploads=3\nignorehiddenfiles=false\n")
+	env := map[string]string{
+		"JOTTA_CONFIG_FILE": cfg,
+	}
+	a := app{
+		getenv: func(key string) string { return env[key] },
+		environ: func() []string {
+			return []string{
+				"JOTTA_CONFIG_MAXDOWNLOADS=4",
+				"JOTTA_CONFIG_SCANINTERVAL=30m",
+				"JOTTA_CONFIG_IGNOREHIDDENFILES=true",
+			}
+		},
+	}
+
+	got, err := a.desiredConfigSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["maxuploads"] != "3" {
+		t.Fatalf("maxuploads = %q, want 3", got["maxuploads"])
+	}
+	if got["maxdownloads"] != "4" {
+		t.Fatalf("maxdownloads = %q, want 4", got["maxdownloads"])
+	}
+	if got["scaninterval"] != "30m" {
+		t.Fatalf("scaninterval = %q, want 30m", got["scaninterval"])
+	}
+	if got["ignorehiddenfiles"] != "true" {
+		t.Fatalf("ignorehiddenfiles = %q, want true (env override should win)", got["ignorehiddenfiles"])
+	}
+}
+
+func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldPath := managedConfigStatePath
+	managedConfigStatePath = filepath.Join(tmpDir, "managed-config.state")
+	t.Cleanup(func() { managedConfigStatePath = oldPath })
+	if err := os.WriteFile(managedConfigStatePath, []byte("scaninterval=15m\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{runResults: map[string][]fakeCmdResult{
+		cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1h0m0s"}): {
+			{output: "", err: nil},
+		},
+	}}
+	a := app{
+		runner:  runner,
+		stdout:  io.Discard,
+		stderr:  io.Discard,
+		sleep:   func(time.Duration) {},
+		getenv:  func(string) string { return "" },
+		environ: func() []string { return nil },
+	}
+
+	if err := a.applyManagedConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1h0m0s"})) {
+		t.Fatal("expected scaninterval reset to default")
 	}
 }
 
