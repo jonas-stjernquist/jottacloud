@@ -57,7 +57,11 @@ const (
 
 var (
 	ptyOutput io.Writer = os.Stdout
-	jottaCLI            = "jotta-cli"
+	// jottaCLI is overridable in tests; do not mutate in production code.
+	jottaCLI = "jotta-cli"
+
+	errPtyTimeout    = errors.New("pty timeout")
+	errStatusTimeout = errors.New("status timeout")
 )
 
 type prompt struct {
@@ -101,6 +105,7 @@ type app struct {
 	stderr          io.Writer
 	sleep           func(time.Duration)
 	getenv          func(string) string
+	setenv          func(string, string) error
 	monitorInterval time.Duration
 }
 
@@ -124,6 +129,7 @@ func main() {
 		stderr:          os.Stderr,
 		sleep:           time.Sleep,
 		getenv:          os.Getenv,
+		setenv:          os.Setenv,
 		monitorInterval: defaultMonitorInterval,
 	}
 
@@ -138,7 +144,9 @@ func (a app) run(ctx context.Context, args []string) error {
 	a.configureMonitor()
 
 	if token, err := os.ReadFile(secretTokenPath); err == nil {
-		os.Setenv("JOTTA_TOKEN", strings.TrimSpace(string(token)))
+		if trimmed := strings.TrimSpace(string(token)); trimmed != "" && a.setenv != nil {
+			_ = a.setenv("JOTTA_TOKEN", trimmed)
+		}
 	}
 
 	if err := configureLocaltime(a.getenv("LOCALTIME")); err != nil {
@@ -146,6 +154,9 @@ func (a app) run(ctx context.Context, args []string) error {
 	}
 
 	if len(args) == 1 && args[0] == "bash" {
+		if a.getenv("JOTTA_DEV") != "1" {
+			return errors.New("bash subcommand requires JOTTA_DEV=1")
+		}
 		return runBash()
 	}
 
@@ -163,6 +174,11 @@ func (a app) run(ctx context.Context, args []string) error {
 
 	if err := a.waitForStartup(ctx); err != nil {
 		return err
+	}
+	// Graceful shutdown: if the context was cancelled during startup (e.g. SIGTERM),
+	// skip configuration steps and let the deferred terminateProcess drain jottad.
+	if ctx.Err() != nil {
+		return nil
 	}
 	if err := a.configureBackups(); err != nil {
 		return err
@@ -242,9 +258,13 @@ func (a app) handleStartupStatus(kind statusKind) error {
 		}
 		return a.loginWithToken()
 	case statusNoDeviceNameKind:
+		device := a.getenv("JOTTA_DEVICE")
+		if device == "" {
+			return errors.New("JOTTA_DEVICE is not set")
+		}
 		fmt.Fprintln(a.stdout, "Device name not set, configuring.")
 		return a.runner.PtyRun(jottaCLI, []string{"status"}, []prompt{
-			{promptDeviceName, a.getenv("JOTTA_DEVICE")},
+			{promptDeviceName, device},
 		}, devicePromptTimeout)
 	case statusNotLoggedInKind:
 		fmt.Fprintln(a.stdout, "First time login.")
@@ -261,8 +281,12 @@ func (a app) handleStartupStatus(kind statusKind) error {
 }
 
 func (a app) configureBackups() error {
+	return a.configureBackupsIn("/backup/*")
+}
+
+func (a app) configureBackupsIn(globPattern string) error {
 	fmt.Fprintln(a.stdout, "Adding backup directories.")
-	matches, err := filepath.Glob("/backup/*")
+	matches, err := filepath.Glob(globPattern)
 	if err != nil {
 		return fmt.Errorf("scan backup directories: %w", err)
 	}
@@ -274,7 +298,10 @@ func (a app) configureBackups() error {
 			continue
 		}
 		out, err := a.runChecked(jottaCLI, "add", dir)
-		if err != nil && !strings.Contains(out, "already added to backup") {
+		if err != nil {
+			if strings.Contains(out, "already added to backup") {
+				continue
+			}
 			return err
 		}
 		addedAny = true
@@ -322,7 +349,6 @@ func (a app) ensureSyncConfigured() error {
 		}
 		return nil
 	}
-
 	if err != nil {
 		fmt.Fprintf(a.stdout, "Warning: sync status probe failed, continuing with sync start: %v\n", err)
 	}
@@ -405,7 +431,6 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 
 func (a *app) configureMonitor() {
 	a.monitorInterval = envDurationSecondsFrom(a.getenv, "JOTTA_MONITOR_INTERVAL_SECONDS", a.monitorInterval)
-
 	if a.monitorInterval <= 0 {
 		a.monitorInterval = defaultMonitorInterval
 	}
@@ -440,10 +465,18 @@ func loginWithToken() error {
 }
 
 func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) error {
+	token := getenv("JOTTA_TOKEN")
+	if token == "" {
+		return errors.New("JOTTA_TOKEN is not set")
+	}
+	device := getenv("JOTTA_DEVICE")
+	if device == "" {
+		return errors.New("JOTTA_DEVICE is not set")
+	}
 	return runner.PtyRun(jottaCLI, []string{"login"}, []prompt{
 		{promptLicense, "yes"},
-		{promptToken, getenv("JOTTA_TOKEN")},
-		{promptDeviceName, getenv("JOTTA_DEVICE")},
+		{promptToken, token},
+		{promptDeviceName, device},
 		{promptReuseDevice, "yes"},
 	}, loginTimeout)
 }
@@ -456,13 +489,15 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 	}
 	defer ptmx.Close()
 
-	deadline := time.Now().Add(timeout)
 	buf := make([]byte, 4096)
 	accumulated := ""
 	responded := make([]bool, len(prompts))
 	pendingPrompt := -1
 	pendingPromptReadyAt := time.Time{}
 	responder := newTerminalResponder(prompts)
+
+	deadlineTimer := time.NewTimer(timeout)
+	defer deadlineTimer.Stop()
 
 	type readResult struct {
 		chunk string
@@ -509,7 +544,7 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 		pendingPromptReadyAt = time.Time{}
 	}
 
-	for time.Now().Before(deadline) {
+	for {
 		select {
 		case result, ok := <-readCh:
 			if !ok {
@@ -540,11 +575,12 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 			if pendingPrompt != -1 && time.Now().After(pendingPromptReadyAt) {
 				sendPrompt(pendingPrompt)
 			}
+		case <-deadlineTimer.C:
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return fmt.Errorf("%s: %w", name, errPtyTimeout)
 		}
 	}
-
-	_ = cmd.Process.Kill()
-	return cmd.Wait()
 }
 
 func (execRunner) Run(name string, args ...string) (string, error) {
@@ -606,7 +642,7 @@ func (execRunner) Status(timeout time.Duration) (string, error) {
 		_ = ptmx.Close()
 		<-readDone
 		_ = cmd.Wait()
-		return out.String(), fmt.Errorf("timeout")
+		return out.String(), errStatusTimeout
 	}
 }
 
@@ -795,11 +831,10 @@ func runBash() error {
 }
 
 func formatCommandError(name string, args []string, out string, err error) error {
-	msg := fmt.Sprintf("%s %s: %v", name, strings.Join(args, " "), err)
 	if trimmed := strings.TrimSpace(out); trimmed != "" {
-		msg = fmt.Sprintf("%s: %s", msg, trimmed)
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, trimmed)
 	}
-	return errors.New(msg)
+	return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 }
 
 func loadEnvFile(path string) {
@@ -827,9 +862,25 @@ func loadEnvFile(path string) {
 }
 
 func forceSymlink(target, link string) error {
-	_ = os.Remove(link)
+	info, err := os.Lstat(link)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(link); err != nil {
+				return fmt.Errorf("remove existing symlink %s: %w", link, err)
+			}
+		} else if info.IsDir() {
+			return fmt.Errorf("refusing to replace non-symlink directory at %s", link)
+		} else {
+			if err := os.Remove(link); err != nil {
+				return fmt.Errorf("remove existing file %s: %w", link, err)
+			}
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("stat %s: %w", link, err)
+	}
 	if err := os.Symlink(target, link); err != nil {
-		return err
+		return fmt.Errorf("symlink %s -> %s: %w", link, target, err)
 	}
 	return nil
 }
@@ -854,7 +905,7 @@ func envDurationSecondsFrom(getenv func(string) string, key string, def time.Dur
 	}
 	seconds, err := strconv.Atoi(v)
 	if err != nil || seconds <= 0 {
-		return 0
+		return def
 	}
 	return time.Duration(seconds) * time.Second
 }

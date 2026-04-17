@@ -161,7 +161,11 @@ func main() {
 	}
 
 	if sc.HangForever {
-		select {}
+		// Loop with sleep so Go's deadlock detector doesn't fire; the test
+		// is expected to kill us via the PTY.
+		for {
+			time.Sleep(time.Second)
+		}
 	}
 
 	os.Exit(sc.ExitCode)

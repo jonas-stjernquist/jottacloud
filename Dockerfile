@@ -1,8 +1,10 @@
 FROM golang:trixie AS builder
 
 WORKDIR /build
-COPY go.mod main.go ./
-RUN go mod tidy && CGO_ENABLED=0 go build -ldflags="-s -w" -o entrypoint .
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go ./
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o entrypoint .
 
 FROM debian:trixie-slim
 
