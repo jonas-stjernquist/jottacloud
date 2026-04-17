@@ -964,14 +964,15 @@ func TestEnsureSyncConfigured_SetsUpWhenSyncDisabled(t *testing.T) {
 func TestApplyManagedConfig_FailsOnCommandError(t *testing.T) {
 	runner := &fakeRunner{
 		runResults: map[string][]fakeCmdResult{
-			cmdKey(jottaCLI, []string{"config", "scaninterval", "1m"}): {
+			cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1m"}): {
 				{output: "bad config", err: errors.New("exit status 2")},
 			},
 		},
 	}
-	prevState, _ := os.ReadFile(managedConfigStatePath)
-	t.Cleanup(func() { _ = os.WriteFile(managedConfigStatePath, prevState, 0644) })
-	_ = os.Remove(managedConfigStatePath)
+	tmpDir := t.TempDir()
+	oldPath := managedConfigStatePath
+	managedConfigStatePath = filepath.Join(tmpDir, "managed-config.state")
+	t.Cleanup(func() { managedConfigStatePath = oldPath })
 
 	a := app{
 		runner:          runner,
@@ -1043,30 +1044,6 @@ func TestConfigureBackups_NewDirTriggersSettle(t *testing.T) {
 	}
 }
 
-func TestLoadIgnoreFile_FailsOnCommandError(t *testing.T) {
-	path := writeTempFile(t, "*.tmp\n")
-	runner := &fakeRunner{
-		runResults: map[string][]fakeCmdResult{
-			cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "*.tmp"}): {
-				{output: "nope", err: errors.New("exit status 1")},
-			},
-		},
-	}
-	a := app{
-		runner:          runner,
-		stdout:          io.Discard,
-		stderr:          io.Discard,
-		sleep:           func(time.Duration) {},
-		getenv:          os.Getenv,
-		monitorInterval: time.Millisecond,
-	}
-
-	err := a.loadIgnoreFile(path)
-	if err == nil || !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("loadIgnoreFile error = %v, want command failure", err)
-	}
-}
-
 func TestDesiredIgnorePatterns_DefaultSynologyPatterns(t *testing.T) {
 	a := app{
 		getenv: func(string) string { return "" },
@@ -1118,17 +1095,16 @@ func TestDesiredConfigSettings_MergesFileAndEnvOverrides(t *testing.T) {
 }
 
 func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
-	if err := os.MkdirAll(filepath.Dir(managedConfigStatePath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	prevState, _ := os.ReadFile(managedConfigStatePath)
-	t.Cleanup(func() { _ = os.WriteFile(managedConfigStatePath, prevState, 0644) })
+	tmpDir := t.TempDir()
+	oldPath := managedConfigStatePath
+	managedConfigStatePath = filepath.Join(tmpDir, "managed-config.state")
+	t.Cleanup(func() { managedConfigStatePath = oldPath })
 	if err := os.WriteFile(managedConfigStatePath, []byte("scaninterval=15m\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	runner := &fakeRunner{runResults: map[string][]fakeCmdResult{
-		cmdKey(jottaCLI, []string{"config", "scaninterval", "1h0m0s"}): {
+		cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1h0m0s"}): {
 			{output: "", err: nil},
 		},
 	}}
@@ -1144,7 +1120,7 @@ func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
 	if err := a.applyManagedConfig(); err != nil {
 		t.Fatal(err)
 	}
-	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "scaninterval", "1h0m0s"})) {
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1h0m0s"})) {
 		t.Fatal("expected scaninterval reset to default")
 	}
 }

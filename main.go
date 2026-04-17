@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,13 +20,11 @@ import (
 )
 
 const (
-	dataDir                = "/data/jottad"
-	configDir              = "/data/jotta-cli"
-	ignoreFilePath         = "/config/ignorefile"
-	configFilePath         = "/config/jotta-config.env"
-	managedIgnoreStatePath = "/data/jottad/managed-ignores.state"
-	managedConfigStatePath = "/data/jottad/managed-config.state"
-	secretTokenPath        = "/run/secrets/jotta_token"
+	dataDir         = "/data/jottad"
+	configDir       = "/data/jotta-cli"
+	ignoreFilePath  = "/config/ignorefile"
+	configFilePath  = "/config/jotta-config.env"
+	secretTokenPath = "/run/secrets/jotta_token"
 	localtimeRoot          = "/usr/share/zoneinfo"
 	startupProbeTimeout    = time.Second
 	syncStatusTimeout      = 5 * time.Second
@@ -65,6 +64,11 @@ var (
 
 	errPtyTimeout    = errors.New("pty timeout")
 	errStatusTimeout = errors.New("status timeout")
+
+	// managedIgnoreStatePath and managedConfigStatePath are vars so tests can
+	// override them to use temporary directories.
+	managedIgnoreStatePath = "/data/jottad/managed-ignores.state"
+	managedConfigStatePath = "/data/jottad/managed-config.state"
 
 	defaultIgnorePatterns = []string{
 		"**/@eaDir",
@@ -386,34 +390,6 @@ func (a app) ensureSyncConfigured() error {
 	return nil
 }
 
-func (a app) loadIgnoreFile(path string) error {
-	if _, err := os.Stat(path); err != nil {
-		return nil
-	}
-
-	fmt.Fprintln(a.stdout, "Loading ignore file.")
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open ignore file: %w", err)
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if _, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", line); err != nil {
-			return err
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read ignore file: %w", err)
-	}
-	return nil
-}
-
 func (a app) applyManagedIgnores() error {
 	desired, err := a.desiredIgnorePatterns()
 	if err != nil {
@@ -472,16 +448,25 @@ func (a app) applyManagedConfig() error {
 		return err
 	}
 
-	for key, value := range desired {
-		if err := a.setConfigValue(key, value); err != nil {
+	desiredKeys := make([]string, 0, len(desired))
+	for key := range desired {
+		desiredKeys = append(desiredKeys, key)
+	}
+	sort.Strings(desiredKeys)
+	for _, key := range desiredKeys {
+		if err := a.setConfigValue(key, desired[key]); err != nil {
 			return err
 		}
 	}
 
+	resetKeys := make([]string, 0, len(previous))
 	for key := range previous {
-		if _, stillManaged := desired[key]; stillManaged {
-			continue
+		if _, stillManaged := desired[key]; !stillManaged {
+			resetKeys = append(resetKeys, key)
 		}
+	}
+	sort.Strings(resetKeys)
+	for _, key := range resetKeys {
 		defaultValue, hasDefault := managedConfigDefaults[key]
 		if !hasDefault {
 			fmt.Fprintf(a.stdout, "Warning: cannot reset %s automatically (unknown default), leaving current value unchanged.\n", key)
@@ -517,7 +502,7 @@ func (a app) desiredConfigSettings() (map[string]string, error) {
 
 func (a app) setConfigValue(key, value string) error {
 	fmt.Fprintf(a.stdout, "Setting config %s=%s.\n", key, value)
-	_, err := a.runChecked(jottaCLI, "config", key, value)
+	_, err := a.runChecked(jottaCLI, "config", "set", key, value)
 	return err
 }
 
@@ -1154,7 +1139,7 @@ func uniqueSorted(values []string) []string {
 	for value := range seen {
 		out = append(out, value)
 	}
-	sortStrings(out)
+	sort.Strings(out)
 	return out
 }
 
@@ -1170,7 +1155,7 @@ func subtractStrings(source, remove []string) []string {
 		}
 		out = append(out, value)
 	}
-	sortStrings(out)
+	sort.Strings(out)
 	return out
 }
 
@@ -1255,7 +1240,7 @@ func writeStateMap(path string, values map[string]string) error {
 	for key := range values {
 		keys = append(keys, key)
 	}
-	sortStrings(keys)
+	sort.Strings(keys)
 
 	lines := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -1270,14 +1255,4 @@ func writeStateMap(path string, values map[string]string) error {
 		return fmt.Errorf("write state file: %w", err)
 	}
 	return nil
-}
-
-func sortStrings(values []string) {
-	for i := 0; i < len(values)-1; i++ {
-		for j := i + 1; j < len(values); j++ {
-			if values[j] < values[i] {
-				values[i], values[j] = values[j], values[i]
-			}
-		}
-	}
 }
