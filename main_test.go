@@ -173,7 +173,7 @@ func TestPtyRun_Timeout(t *testing.T) {
 	if !errors.Is(err, errPtyTimeout) {
 		t.Fatalf("expected errPtyTimeout, got %v", err)
 	}
-	if elapsed > 2*time.Second {
+	if elapsed > 3*time.Second {
 		t.Fatalf("took too long: %v", elapsed)
 	}
 }

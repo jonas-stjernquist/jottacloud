@@ -175,7 +175,9 @@ func (a app) run(ctx context.Context, args []string) error {
 	if err := a.waitForStartup(ctx); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
+	// Graceful shutdown: if the context was cancelled during startup (e.g. SIGTERM),
+	// skip configuration steps and let the deferred terminateProcess drain jottad.
+	if ctx.Err() != nil {
 		return nil
 	}
 	if err := a.configureBackups(); err != nil {
@@ -487,13 +489,15 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 	}
 	defer ptmx.Close()
 
-	deadline := time.Now().Add(timeout)
 	buf := make([]byte, 4096)
 	accumulated := ""
 	responded := make([]bool, len(prompts))
 	pendingPrompt := -1
 	pendingPromptReadyAt := time.Time{}
 	responder := newTerminalResponder(prompts)
+
+	deadlineTimer := time.NewTimer(timeout)
+	defer deadlineTimer.Stop()
 
 	type readResult struct {
 		chunk string
@@ -571,7 +575,7 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 			if pendingPrompt != -1 && time.Now().After(pendingPromptReadyAt) {
 				sendPrompt(pendingPrompt)
 			}
-		case <-time.After(time.Until(deadline)):
+		case <-deadlineTimer.C:
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 			return fmt.Errorf("%s: %w", name, errPtyTimeout)
