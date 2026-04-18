@@ -176,6 +176,7 @@ jotta-cli config set <key> <value>  # Set value
 | `downloadrate` | unlimited | Max download (e.g., `1m`=1MB/s, `512k`, `0`=unlimited) |
 | `uploadrate` | unlimited | Max upload bandwidth |
 | `checksumreadrate` | ~52MB/s | Disk read rate for checksumming |
+| `checksumthreads` | 2 | Maximum concurrent checksum worker threads |
 | `ignorehiddenfiles` | false | Skip dotfiles (linux/mac) or hidden attribute (Windows) |
 | `maxuploads` | 6 | Simultaneous uploads (1-6) |
 | `maxdownloads` | 6 | Simultaneous downloads (1-6) |
@@ -185,7 +186,10 @@ jotta-cli config set <key> <value>  # Set value
 | `slowmomode` | 0 | Reduce scan CPU/disk (0-50) |
 | `logtransfers` | false | Log all HTTP transfer requests |
 | `screenshotscapture` | false | Auto-upload screenshots (macOS/Linux) |
+| `sharecapturedscreenshots` | false | Share captured screenshots automatically |
 | `syncpaused` | false | Pause sync |
+| `timeformat` | RFC3339 | Output time format used by `jotta-cli` |
+| `usesiunits` | false | Use SI file sizes (`KB`, `MB`) instead of binary units (`KiB`, `MiB`) |
 
 ### jottad Config File (INI)
 

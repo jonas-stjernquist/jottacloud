@@ -16,11 +16,8 @@ VOLUME ["/data"]
 
 ENV JOTTA_TOKEN="**None**" \
     JOTTA_DEVICE="**docker-jottacloud**" \
-    JOTTA_CONFIG_SCANINTERVAL="12h" \
-    JOTTA_IGNORE_FILE="/config/ignorefile" \
-    JOTTA_CONFIG_FILE="/config/jotta-config.env" \
     LOCALTIME="Europe/Stockholm" \
-    STARTUP_TIMEOUT=15 \
+    STARTUP_TIMEOUT=30 \
     JOTTAD_SYSTEMD=0
 
 RUN apt-get update && \

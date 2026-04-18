@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test: Scan interval configuration.
-# Verifies that JOTTA_SCANINTERVAL is applied.
+# Verifies that JOTTA_CONFIG_SCANINTERVAL is applied.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 

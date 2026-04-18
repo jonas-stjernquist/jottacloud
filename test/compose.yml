@@ -5,7 +5,7 @@ services:
     env_file: .env
     environment:
       - JOTTA_DEVICE=integration-test
-      - JOTTA_SCANINTERVAL=1m
+      - JOTTA_CONFIG_SCANINTERVAL=1m
       - STARTUP_TIMEOUT=30
       - LOCALTIME=Europe/Stockholm
     volumes:
@@ -13,6 +13,5 @@ services:
       - ./data/jotta-cli:/data/jotta-cli
       - ./backup:/backup
       - ./sync:/sync
-      - ./config/ignorefile:/config/ignorefile:ro
     ports:
       - "14443:14443"

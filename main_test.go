@@ -669,6 +669,46 @@ func TestForceSymlink_ReplacesRegularFile(t *testing.T) {
 	}
 }
 
+func TestPreparePersistentPaths_CreatesManagedFiles(t *testing.T) {
+	withManagedPaths(t)
+
+	if err := preparePersistentPaths(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readFile(t, configFilePath); got != defaultConfigFileContent() {
+		t.Fatalf("config template mismatch:\n%s", got)
+	}
+	if got := readFile(t, ignoreFilePath); got != defaultIgnoreFileContent() {
+		t.Fatalf("ignore template mismatch:\n%s", got)
+	}
+}
+
+func TestPreparePersistentPaths_PreservesExistingManagedFiles(t *testing.T) {
+	withManagedPaths(t)
+
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configFilePath, []byte("custom=1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoreFilePath, []byte("custom/pattern\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := preparePersistentPaths(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readFile(t, configFilePath); got != "custom=1\n" {
+		t.Fatalf("config file overwritten: %q", got)
+	}
+	if got := readFile(t, ignoreFilePath); got != "custom/pattern\n" {
+		t.Fatalf("ignore file overwritten: %q", got)
+	}
+}
+
 // --- configureLocaltime tests ---
 
 func TestConfigureLocaltime_Empty(t *testing.T) {
@@ -784,6 +824,36 @@ func writeTempFile(t *testing.T, content string) string {
 	return f.Name()
 }
 
+func withManagedPaths(t *testing.T) string {
+	t.Helper()
+	baseDir := t.TempDir()
+
+	oldDataDir := dataDir
+	oldConfigDir := configDir
+	oldConfigFilePath := configFilePath
+	oldIgnoreFilePath := ignoreFilePath
+	oldRootJottadPath := rootJottadPath
+	oldRootJottaCLIConfigDir := rootJottaCLIConfigDir
+
+	dataDir = filepath.Join(baseDir, "data", "jottad")
+	configDir = filepath.Join(baseDir, "data", "jotta-cli")
+	configFilePath = filepath.Join(dataDir, "jotta-config.env")
+	ignoreFilePath = filepath.Join(dataDir, "ignorefile")
+	rootJottadPath = filepath.Join(baseDir, "root", ".jottad")
+	rootJottaCLIConfigDir = filepath.Join(baseDir, "root", ".config", "jotta-cli")
+
+	t.Cleanup(func() {
+		dataDir = oldDataDir
+		configDir = oldConfigDir
+		configFilePath = oldConfigFilePath
+		ignoreFilePath = oldIgnoreFilePath
+		rootJottadPath = oldRootJottadPath
+		rootJottaCLIConfigDir = oldRootJottaCLIConfigDir
+	})
+
+	return baseDir
+}
+
 func assertEnv(t *testing.T, key, want string) {
 	t.Helper()
 	if got := os.Getenv(key); got != want {
@@ -798,6 +868,15 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
 }
 
 func TestTerminalResponder_SplitQueriesAcrossReads(t *testing.T) {
@@ -1044,29 +1123,49 @@ func TestConfigureBackups_NewDirTriggersSettle(t *testing.T) {
 	}
 }
 
-func TestDesiredIgnorePatterns_DefaultSynologyPatterns(t *testing.T) {
+func TestDesiredIgnorePatterns_MergesFileAndEnvPatterns(t *testing.T) {
+	withManagedPaths(t)
+	if err := os.MkdirAll(filepath.Dir(ignoreFilePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoreFilePath, []byte("# comment\nbase/pattern\n# commented\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	a := app{
-		getenv: func(string) string { return "" },
+		getenv: func(key string) string {
+			if key == "JOTTA_IGNORE_PATTERNS" {
+				return "extra/one,extra/two"
+			}
+			return ""
+		},
 	}
 
 	patterns, err := a.desiredIgnorePatterns()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range defaultIgnorePatterns {
+	for _, want := range []string{"base/pattern", "extra/one", "extra/two"} {
 		if !containsString(patterns, want) {
-			t.Fatalf("desiredIgnorePatterns missing default %q", want)
+			t.Fatalf("desiredIgnorePatterns missing %q", want)
 		}
+	}
+	if containsString(patterns, defaultIgnorePatterns[0]) {
+		t.Fatalf("desiredIgnorePatterns unexpectedly injected built-in default %q", defaultIgnorePatterns[0])
 	}
 }
 
 func TestDesiredConfigSettings_MergesFileAndEnvOverrides(t *testing.T) {
-	cfg := writeTempFile(t, "maxuploads=3\nignorehiddenfiles=false\n")
-	env := map[string]string{
-		"JOTTA_CONFIG_FILE": cfg,
+	withManagedPaths(t)
+	if err := os.MkdirAll(filepath.Dir(configFilePath), 0755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(configFilePath, []byte("maxuploads=3\n# comment\nignorehiddenfiles=false\n# maxdownloads=9\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	a := app{
-		getenv: func(key string) string { return env[key] },
+		getenv: func(string) string { return "" },
 		environ: func() []string {
 			return []string{
 				"JOTTA_CONFIG_MAXDOWNLOADS=4",

@@ -121,9 +121,9 @@ test/
 ├── compose.yml           # Podman compose for tests
 ├── backup/documents/     # Test files for backup
 ├── sync/                 # Test file for sync
-├── config/ignorefile     # Test ignore patterns
+├── data/jottad/          # Persistent state plus generated config files
 ├── scripts/              # Test scripts
-└── data/                 # (git-ignored) Persistent state during tests
+└── data/                 # Persistent state during tests
 ```
 
 ### Environment
