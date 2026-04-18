@@ -334,7 +334,7 @@ func TestLoginWithToken_NewDevice(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithToken()
+	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestLoginWithToken_ExistingDevice(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithToken()
+	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,12 +369,12 @@ func TestLoginWithToken_PromptStringsMatch(t *testing.T) {
 	t.Setenv("JOTTA_TOKEN", "tok")
 	t.Setenv("JOTTA_DEVICE", "dev")
 
-	// We can't easily inspect loginWithToken's internals, but we can verify
+	// We can't easily inspect loginWithTokenWithRunner's internals, but we can verify
 	// the prompt strings by running it against exact prompts. If any prompt
 	// string in main.go changes, this test will hang (timeout) or fail.
 	setScenarioEnv(t, fakeScenario{
 		Steps: []fakeStep{
-			// These must exactly match the prompts in loginWithToken().
+			// These must exactly match the prompts in loginWithTokenWithRunner().
 			{Prompt: "accept license (yes/no): ", Expect: "yes"},
 			{Prompt: "Personal login token: ", Expect: "tok"},
 			{Prompt: "Device name: ", Expect: "dev"},
@@ -385,7 +385,7 @@ func TestLoginWithToken_PromptStringsMatch(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithToken()
+	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatalf("loginWithToken failed — prompt strings may have changed: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestLoginWithToken_DefersLicenseResponseAfterTerminalQueries(t *testing.T) 
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithToken()
+	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestLoginWithToken_WaitsForQuietReadBeforeLicenseResponse(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithToken()
+	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,39 +506,39 @@ func TestStatusPatternMatching(t *testing.T) {
 
 func TestLoadEnvFile_BasicKeyValue(t *testing.T) {
 	f := writeTempFile(t, "KEY1=value1\nKEY2=value2\n")
-	loadEnvFile(f)
+	loadEnvFile(f, os.Setenv)
 	assertEnv(t, "KEY1", "value1")
 	assertEnv(t, "KEY2", "value2")
 }
 
 func TestLoadEnvFile_QuotedValues(t *testing.T) {
 	f := writeTempFile(t, `DOUBLE="hello world"`+"\n"+`SINGLE='foo bar'`+"\n")
-	loadEnvFile(f)
+	loadEnvFile(f, os.Setenv)
 	assertEnv(t, "DOUBLE", "hello world")
 	assertEnv(t, "SINGLE", "foo bar")
 }
 
 func TestLoadEnvFile_ExportPrefix(t *testing.T) {
 	f := writeTempFile(t, "export MY_VAR=exported\n")
-	loadEnvFile(f)
+	loadEnvFile(f, os.Setenv)
 	assertEnv(t, "MY_VAR", "exported")
 }
 
 func TestLoadEnvFile_CommentsAndBlanks(t *testing.T) {
 	f := writeTempFile(t, "# comment\n\nVALID=yes\n  # indented comment\n")
-	loadEnvFile(f)
+	loadEnvFile(f, os.Setenv)
 	assertEnv(t, "VALID", "yes")
 }
 
 func TestLoadEnvFile_NoEquals(t *testing.T) {
 	f := writeTempFile(t, "NOEQUALS\n=noleft\nGOOD=ok\n")
-	loadEnvFile(f)
+	loadEnvFile(f, os.Setenv)
 	assertEnv(t, "GOOD", "ok")
 }
 
 func TestLoadEnvFile_MissingFile(t *testing.T) {
 	// Should not panic or error — silently ignored.
-	loadEnvFile("/nonexistent/path/env")
+	loadEnvFile("/nonexistent/path/env", os.Setenv)
 }
 
 // --- envInt tests ---
@@ -1225,10 +1225,8 @@ func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
 
 func TestMonitor_ReturnsOnHealthCheckFailure(t *testing.T) {
 	runner := &fakeRunner{
-		runResults: map[string][]fakeCmdResult{
-			cmdKey(jottaCLI, []string{"status"}): {
-				{output: "status failure", err: errors.New("exit status 1")},
-			},
+		statusResults: []fakeCmdResult{
+			{output: "status failure", err: errors.New("exit status 1")},
 		},
 	}
 	var stdout bytes.Buffer
@@ -1252,11 +1250,9 @@ func TestMonitor_ReturnsOnHealthCheckFailure(t *testing.T) {
 
 func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
 	runner := &fakeRunner{
-		runResults: map[string][]fakeCmdResult{
-			cmdKey(jottaCLI, []string{"status"}): {
-				{output: "ok", err: nil},
-				{output: "ok", err: nil},
-			},
+		statusResults: []fakeCmdResult{
+			{output: "ok", err: nil},
+			{output: "ok", err: nil},
 		},
 	}
 	a := app{

@@ -181,8 +181,8 @@ func main() {
 }
 
 func (a app) run(ctx context.Context, args []string) error {
-	loadEnvFile(filepath.Join(dataDir, "jottad.env"))
-	a.configureMonitor()
+	loadEnvFile(filepath.Join(dataDir, "jottad.env"), a.setenv)
+	a.monitorInterval = configureMonitor(a.getenv, a.monitorInterval)
 
 	if token, err := os.ReadFile(secretTokenPath); err == nil {
 		if trimmed := strings.TrimSpace(string(token)); trimmed != "" && a.setenv != nil {
@@ -210,8 +210,6 @@ func (a app) run(ctx context.Context, args []string) error {
 		return fmt.Errorf("start jottad: %w", err)
 	}
 	defer terminateProcess(jottad, shutdownGracePeriod)
-
-	a.sleep(time.Second)
 
 	if err := a.waitForStartup(ctx); err != nil {
 		return err
@@ -262,8 +260,11 @@ func (a app) waitForStartup(ctx context.Context) error {
 			return nil
 		}
 
-		fmt.Fprintln(a.stdout, "Could not start jottad. Checking why.")
-		if err := a.handleStartupStatus(classifyStatus(out)); err != nil {
+		status := classifyStatus(out)
+		if status != statusUnknown {
+			fmt.Fprintln(a.stdout, "Could not start jottad. Checking why.")
+		}
+		if err := a.handleStartupStatus(status); err != nil {
 			return err
 		}
 
@@ -335,7 +336,13 @@ func (a app) configureBackupsIn(globPattern string) error {
 	addedAny := false
 	for _, dir := range matches {
 		fi, statErr := os.Stat(dir)
-		if statErr != nil || !fi.IsDir() {
+		if statErr != nil {
+			if !errors.Is(statErr, os.ErrNotExist) {
+				fmt.Fprintf(a.stdout, "Warning: cannot access backup directory %s: %v\n", dir, statErr)
+			}
+			continue
+		}
+		if !fi.IsDir() {
 			continue
 		}
 		out, err := a.runChecked(jottaCLI, "add", dir)
@@ -407,16 +414,18 @@ func (a app) applyManagedIgnores() error {
 	}
 
 	for _, pattern := range subtractStrings(previous, desired) {
-		if _, err := a.runChecked(jottaCLI, "ignores", "rem", "--pattern", pattern); err != nil {
-			if strings.Contains(err.Error(), "not found") {
+		out, err := a.runChecked(jottaCLI, "ignores", "rem", "--pattern", pattern)
+		if err != nil {
+			if strings.Contains(out, "not found") {
 				continue
 			}
 			return err
 		}
 	}
 	for _, pattern := range subtractStrings(desired, previous) {
-		if _, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", pattern); err != nil {
-			if strings.Contains(err.Error(), "already") {
+		out, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", pattern)
+		if err != nil {
+			if strings.Contains(out, "already") {
 				continue
 			}
 			return err
@@ -455,6 +464,9 @@ func (a app) applyManagedConfig() error {
 	}
 	sort.Strings(desiredKeys)
 	for _, key := range desiredKeys {
+		if previous[key] == desired[key] {
+			continue
+		}
 		if err := a.setConfigValue(key, desired[key]); err != nil {
 			return err
 		}
@@ -522,7 +534,7 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 			}
 			return errors.New("jotta-cli tail exited unexpectedly")
 		case <-ticker.C:
-			out, err := a.runner.Run(jottaCLI, "status")
+			out, err := a.runner.Status(startupProbeTimeout)
 			if err != nil {
 				fmt.Fprintln(a.stdout, "Jottad exited unexpectedly:")
 				if out != "" {
@@ -537,11 +549,12 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 	}
 }
 
-func (a *app) configureMonitor() {
-	a.monitorInterval = envDurationSecondsFrom(a.getenv, "JOTTA_MONITOR_INTERVAL_SECONDS", a.monitorInterval)
-	if a.monitorInterval <= 0 {
-		a.monitorInterval = defaultMonitorInterval
+func configureMonitor(getenv func(string) string, current time.Duration) time.Duration {
+	d := envDurationSecondsFrom(getenv, "JOTTA_MONITOR_INTERVAL_SECONDS", current)
+	if d <= 0 {
+		return defaultMonitorInterval
 	}
+	return d
 }
 
 func (a app) logout() error {
@@ -566,10 +579,6 @@ func (a app) runChecked(name string, args ...string) (string, error) {
 		return out, nil
 	}
 	return out, formatCommandError(name, args, out, err)
-}
-
-func loginWithToken() error {
-	return loginWithTokenWithRunner(execRunner{}, os.Getenv)
 }
 
 func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) error {
@@ -662,6 +671,9 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 				fmt.Fprint(ptyOutput, result.chunk)
 				hadTerminalQuery := responder.respond(ptmx, result.chunk)
 				accumulated += result.chunk
+				if len(accumulated) > 65536 {
+					accumulated = accumulated[len(accumulated)-32768:]
+				}
 
 				if pendingPrompt == -1 {
 					for i, p := range prompts {
@@ -1026,7 +1038,7 @@ func isCommentLine(line string) bool {
 	return strings.HasPrefix(line, "#")
 }
 
-func loadEnvFile(path string) {
+func loadEnvFile(path string, setenv func(string, string) error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -1046,7 +1058,7 @@ func loadEnvFile(path string) {
 		}
 		key := line[:idx]
 		val := strings.Trim(line[idx+1:], `"'`)
-		_ = os.Setenv(key, val)
+		_ = setenv(key, val)
 	}
 }
 
@@ -1058,6 +1070,10 @@ func forceSymlink(target, link string) error {
 	switch {
 	case err == nil:
 		if info.Mode()&os.ModeSymlink != 0 {
+			current, readErr := os.Readlink(link)
+			if readErr == nil && current == target {
+				return nil
+			}
 			if err := os.Remove(link); err != nil {
 				return fmt.Errorf("remove existing symlink %s: %w", link, err)
 			}
