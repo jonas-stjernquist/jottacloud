@@ -203,7 +203,7 @@ At startup the container:
 
 1. reads `/data/jottad/jotta-config.env`
 2. applies `JOTTA_CONFIG_<SETTING>` overrides
-3. runs `jotta-cli config <setting> <value>` for the managed settings it finds
+3. runs `jotta-cli config set <setting> <value>` for the managed settings it finds
 
 If a previously managed setting is removed from both the file and env, the container resets it to the known CLI default for the settings it tracks internally.
 
