@@ -1176,6 +1176,13 @@ func readConfigFile(path string) (map[string]string, error) {
 	return config, nil
 }
 
+// configEnvBlocklist contains JOTTA_CONFIG_* env var names that are reserved
+// for non-setting purposes and must not be forwarded to jotta-cli config set.
+// JOTTA_CONFIG_FILE was used in older versions to point to the config file path.
+var configEnvBlocklist = map[string]struct{}{
+	"JOTTA_CONFIG_FILE": {},
+}
+
 func parseConfigEnvOverrides(environ []string) map[string]string {
 	config := map[string]string{}
 	for _, entry := range environ {
@@ -1189,6 +1196,9 @@ func parseConfigEnvOverrides(environ []string) map[string]string {
 			continue
 		}
 		if !strings.HasPrefix(key, "JOTTA_CONFIG_") {
+			continue
+		}
+		if _, blocked := configEnvBlocklist[key]; blocked {
 			continue
 		}
 		normalized := normalizeConfigKey(strings.TrimPrefix(key, "JOTTA_CONFIG_"))

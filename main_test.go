@@ -1192,6 +1192,24 @@ func TestDesiredConfigSettings_MergesFileAndEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestParseConfigEnvOverrides_BlocklistExcludesLegacyVars(t *testing.T) {
+	environ := []string{
+		"JOTTA_CONFIG_SCANINTERVAL=1h",
+		"JOTTA_CONFIG_FILE=/some/legacy/path",
+		"JOTTA_CONFIG_MAXUPLOADS=4",
+	}
+	got := parseConfigEnvOverrides(environ)
+	if _, exists := got["file"]; exists {
+		t.Error("JOTTA_CONFIG_FILE should be excluded from config overrides (legacy var)")
+	}
+	if got["scaninterval"] != "1h" {
+		t.Errorf("scaninterval = %q, want 1h", got["scaninterval"])
+	}
+	if got["maxuploads"] != "4" {
+		t.Errorf("maxuploads = %q, want 4", got["maxuploads"])
+	}
+}
+
 func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldPath := managedConfigStatePath
