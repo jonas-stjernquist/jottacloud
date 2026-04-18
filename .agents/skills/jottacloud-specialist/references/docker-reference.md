@@ -28,10 +28,11 @@ docker run \
 |----------|---------|-------------|
 | `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only — credentials are saved to the `/data/jottad` volume after that. |
 | `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. Identifies which machine the backup belongs to. |
-| `JOTTA_SCANINTERVAL` | `12h` | How often to scan for changes. Examples: `1h`, `30m`, `0` (realtime). |
+| `JOTTA_CONFIG_<SETTING>` | `""` | Override a managed `jotta-cli config` setting such as `JOTTA_CONFIG_SCANINTERVAL=12h`. |
+| `JOTTA_IGNORE_PATTERNS` | `""` | Extra ignore patterns added on top of `/data/jottad/ignorefile`. |
 | `JOTTA_MONITOR_INTERVAL_SECONDS` | `15` | Seconds between background `jotta-cli status` health probes. |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
-| `STARTUP_TIMEOUT` | `15` | Seconds to wait for jottad to start before exiting with an error. |
+| `STARTUP_TIMEOUT` | `30` | Seconds to wait for jottad to start before exiting with an error. |
 | `JOTTAD_SYSTEMD` | `0` | Controls whether jottad attempts systemd integration (sd_notify, socket activation). Must be `0` inside Docker — containers don't run systemd. Set to `1` only when running jottad directly on a host with systemd. |
 
 ### Environment variable priority (highest last)
@@ -50,7 +51,8 @@ docker run \
 | `/data/jottad` | Persistent config and state. **Always mount this** to preserve login and backup progress across restarts. |
 | `/backup/` | Backup source. Each subdirectory under `/backup/` is registered via `jotta-cli add`. Mount multiple sources: `-v /home:/backup/home -v /var/data:/backup/data`. |
 | `/sync` | Sync source. Mount a **single** directory here. Only one sync root is supported by jotta-cli. |
-| `/config/ignorefile` | Optional gitignore-style ignore file. On startup, each non-comment line is loaded as a separate ignore pattern via `jotta-cli ignores add --pattern <line>`. |
+| `/data/jottad/jotta-config.env` | Auto-created commented template for managed `jotta-cli config` settings. |
+| `/data/jottad/ignorefile` | Auto-created ignore file containing the Synology defaults. |
 
 ---
 
@@ -65,7 +67,7 @@ services:
     environment:
       - JOTTA_TOKEN=your-token-here
       - JOTTA_DEVICE=my-docker-backup
-      - JOTTA_SCANINTERVAL=12h
+      - JOTTA_CONFIG_SCANINTERVAL=12h
       - LOCALTIME=Europe/Stockholm
     volumes:
       - ./jottacloud-config:/data/jottad
@@ -119,12 +121,13 @@ jottad normally expects systemd, which doesn't exist in a container. This image 
    | `/volume1/documents` | `/backup/documents` | Backup |
    | `/volume1/photos` | `/sync` | Sync (only one allowed) |
 
-5. Set env vars: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_SCANINTERVAL`, `LOCALTIME`.
+5. Set env vars: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `LOCALTIME`, and optional `JOTTA_CONFIG_<SETTING>` overrides.
 6. `JOTTA_TOKEN` only needed on first start — credentials persist in `/data/jottad`.
+7. On first start the container creates `/data/jottad/jotta-config.env` and `/data/jottad/ignorefile`.
 
 ### Recommended Synology ignore file
 
-If your NAS shares contain Synology metadata folders, mount an ignore file to `/config/ignorefile` with:
+The container creates `/data/jottad/ignorefile` with these defaults:
 
 ```text
 **/@eaDir
@@ -175,9 +178,10 @@ The container uses a custom Go entrypoint (`main.go`) instead of a shell script.
    - **Matching device found** → confirms re-use
 6. Registers all directories under `/backup/` as backup sources
 7. Sets up `/sync` as sync root (if mounted and non-empty)
-8. Loads `/config/ignorefile` (if present)
-9. Sets `scaninterval` from `JOTTA_SCANINTERVAL`
-10. Runs `jotta-cli tail` to stream logs, then health-checks via `jotta-cli status`
+8. Creates `/data/jottad/jotta-config.env` and `/data/jottad/ignorefile` if missing
+9. Loads `/data/jottad/ignorefile`
+10. Applies managed settings from `/data/jottad/jotta-config.env` plus `JOTTA_CONFIG_<SETTING>` env overrides
+11. Runs `jotta-cli tail` to stream logs, then health-checks via `jotta-cli status`
 
 For production troubleshooting, prefer `docker exec jottacloud jotta-cli status` or `docker logs -f jottacloud` over repeatedly running CLI commands in a long-lived interactive shell while a large scan is in progress.
 

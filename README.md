@@ -1,12 +1,10 @@
 # Jottacloud Docker
 
-**NOTE: This software is in a experimental stage and should not be considered as a stable solution**
+**NOTE:** This software is still experimental.
 
-Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running on Debian. &nbsp;·&nbsp; [GitHub](https://github.com/jonas-stjernquist/jottacloud) &nbsp;·&nbsp; [Docker Hub](https://hub.docker.com/r/stjernquist/jottacloud)
+Dockerized [Jottacloud](https://www.jottacloud.com/) CLI backup client running on Debian. It uses the official `jotta-cli` package and is rebuilt regularly to pick up Debian security updates and newer Jottacloud CLI releases.
 
-Built on `debian:trixie-slim` with the official `jotta-cli` package. The image is automatically rebuilt weekly via GitHub Actions to pick up the latest OS security patches and Jottacloud CLI updates.
-
-**Supported platforms:** `linux/amd64`, `linux/arm64`
+Supported platforms: `linux/amd64`, `linux/arm64`
 
 ## Quick Start
 
@@ -14,77 +12,143 @@ Built on `debian:trixie-slim` with the official `jotta-cli` package. The image i
 docker run \
   -e JOTTA_TOKEN=your-personal-login-token \
   -e JOTTA_DEVICE=my-docker-backup \
-  -v /path/to/config:/data/jottad \
+  -v /path/to/jottacloud-data:/data/jottad \
   -v /path/to/backup:/backup/data \
   stjernquist/jottacloud
+```
+
+On first start the container creates two editable files inside `/data/jottad`:
+
+- `jotta-config.env`
+- `ignorefile`
+
+## How Configuration Works
+
+The container uses `/data/jottad` as the persistent control directory.
+
+It stores:
+
+- login/session state
+- backup and sync state
+- managed state tracking for config and ignore reconciliation
+- `jotta-config.env`
+- `ignorefile`
+
+### `jotta-config.env`
+
+`/data/jottad/jotta-config.env` is a commented template for `jotta-cli config` settings.
+
+- It is created automatically if missing.
+- Every line is commented out by default.
+- Uncomment only the settings you want the container to manage.
+- `#` is the comment marker.
+
+Example generated content:
+
+```ini
+# downloadrate=0
+# uploadrate=0
+# checksumreadrate=52m
+# checksumthreads=2
+# maxuploads=12
+# maxdownloads=12
+# scaninterval=1h0m0s
+# webhookstatusinterval=6h0m0s
+# ignorehiddenfiles=false
+# logscanignores=false
+# slowmomode=0
+# logtransfers=false
+# screenshotscapture=false
+# sharecapturedscreenshots=false
+# syncpaused=false
+# timeformat=RFC3339
+# usesiunits=false
+```
+
+### `ignorefile`
+
+`/data/jottad/ignorefile` is the base ignore list for backup scanning.
+
+- It is created automatically if missing.
+- It starts with the built-in Synology metadata/recycle patterns as active lines.
+- Edit the file directly to keep, remove, or add ignore patterns.
+- `#` is the comment marker.
+
+Default contents:
+
+```text
+**/@eaDir
+**/@eaDir/**
+**/@tmp
+**/@tmp/**
+**/#recycle
+**/#recycle/**
+```
+
+## Precedence
+
+### Settings
+
+Managed settings are applied in this order:
+
+1. Values from `/data/jottad/jotta-config.env`
+2. Values from `JOTTA_CONFIG_<SETTING>` environment variables
+
+If the same setting exists in both places, the environment variable wins.
+
+Example:
+
+```bash
+-e JOTTA_CONFIG_MAXUPLOADS=4
+-e JOTTA_CONFIG_SCANINTERVAL=12h
+```
+
+### Ignore Rules
+
+Managed ignore patterns are applied in this order:
+
+1. Patterns from `/data/jottad/ignorefile`
+2. Extra patterns from `JOTTA_IGNORE_PATTERNS`
+
+`JOTTA_IGNORE_PATTERNS` is additive. It does not replace `ignorefile`.
+
+Example:
+
+```bash
+-e JOTTA_IGNORE_PATTERNS="**/*.tmp,**/node_modules"
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login. Use a persistent volume on `/data/jottad` to preserve login state. |
-| `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. Identifies which machine the backup belongs to. |
-| `JOTTA_IGNORE_FILE` | `/config/ignorefile` | Optional path to ignore pattern file. If present, patterns are merged with built-in Synology defaults. |
-| `JOTTA_IGNORE_PATTERNS` | `""` | Optional extra ignore patterns as comma- or newline-separated values. |
-| `JOTTA_CONFIG_FILE` | `/config/jotta-config.env` | Optional key/value file for `jotta-cli` config settings, e.g. `maxuploads=4`. |
-| `JOTTA_CONFIG_<SETTING>` | `""` | Override any CLI setting from env, for example `JOTTA_CONFIG_MAXUPLOADS=4`. |
-| `JOTTA_CONFIG_SCANINTERVAL` | `12h` | Example of a managed CLI setting passed as env (`JOTTA_CONFIG_<SETTING>`). |
+| `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only. |
+| `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. |
+| `JOTTA_CONFIG_<SETTING>` | `""` | Override a `jotta-cli config` setting, for example `JOTTA_CONFIG_MAXUPLOADS=4`. |
+| `JOTTA_IGNORE_PATTERNS` | `""` | Extra ignore patterns as comma- or newline-separated values. Added on top of `ignorefile`. |
 | `JOTTA_MONITOR_INTERVAL_SECONDS` | `15` | Seconds between background `jotta-cli status` health probes. |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
-| `STARTUP_TIMEOUT` | `15` | Seconds to wait for jottad to start before failing. |
-| `JOTTAD_SYSTEMD` | `0` | Controls whether the `jottad` daemon attempts systemd integration (sd_notify, socket activation). Set to `0` in this image since Docker containers don't run systemd. Set to `1` only if running `jottad` directly on a host with systemd. |
+| `STARTUP_TIMEOUT` | `30` | Seconds to wait for `jottad` startup before failing. |
+| `JOTTAD_SYSTEMD` | `0` | Must stay `0` inside Docker since the container does not run systemd. |
 
-### Environment variable priority (highest last)
+### Other Environment Sources
 
-1. Defaults in Dockerfile
-2. Values from `docker run -e`
-3. Values from `/data/jottad/jottad.env` file
+Container env is loaded in this order:
+
+1. Defaults baked into the image
+2. Values from `docker run -e` or Compose `environment:`
+3. Values from `/data/jottad/jottad.env`
 4. Docker secret `jotta_token`
 
-### Managed CLI config priority (highest last)
-
-1. Values from `JOTTA_CONFIG_FILE` (default `/config/jotta-config.env`)
-2. Values from `JOTTA_CONFIG_<SETTING>` environment variables
-
-If the same key exists in both places, `JOTTA_CONFIG_<SETTING>` wins.
+This order applies to normal container environment variables such as `JOTTA_TOKEN` or `LOCALTIME`.
 
 ## Volumes
 
 | Path | Description |
 |------|-------------|
-| `/data/jottad` | Persistent config and state. **Mount this to preserve login and backup progress across restarts.** |
-| `/backup/` | Backup source. Each subdirectory is registered via `jotta-cli add`, e.g. `-v /home:/backup/home`. |
-| `/sync` | Sync source. Mount a **single** directory here, e.g. `-v /photos:/sync`. Only one sync root is supported by `jotta-cli`. |
-| `/config/ignorefile` | Optional gitignore-style file for excluding paths from backup. Merged with built-in Synology ignore defaults. |
-| `/config/jotta-config.env` | Optional key/value file to manage `jotta-cli config` settings at startup/restart. |
-
-### Backup vs. Sync
-
-- **Backup** (`/backup/`): one-way upload, full version history, deleted files kept in trash for 30 days.
-- **Sync** (`/sync`): bi-directional sync, up to 5 versions, deletions on device propagate to all synced locations. Only one sync root is supported by `jotta-cli`.
-
-## Docker Secrets
-
-The container supports Docker secrets for the login token:
-
-```yaml
-# docker-compose.yml
-services:
-  jottacloud:
-    image: stjernquist/jottacloud
-    environment:
-      - JOTTA_DEVICE=my-backup
-    secrets:
-      - jotta_token
-    volumes:
-      - ./jottacloud-config:/data/jottad
-      - /home:/backup/home
-
-secrets:
-  jotta_token:
-    file: ./jotta_token.txt
-```
+| `/data/jottad` | Persistent Jottacloud state and editable configuration files. Mount this. |
+| `/backup/` | Backup sources. Each directory under `/backup/` is added with `jotta-cli add`. |
+| `/sync` | Optional sync source. Mount a single directory here. |
 
 ## Docker Compose
 
@@ -98,111 +162,72 @@ services:
       - JOTTA_TOKEN=your-token-here
       - JOTTA_DEVICE=my-docker-backup
       - JOTTA_CONFIG_SCANINTERVAL=12h
+      - JOTTA_IGNORE_PATTERNS=**/*.tmp
       - LOCALTIME=Europe/Stockholm
     volumes:
-      - ./jottacloud-config:/data/jottad
+      - ./jottacloud-data:/data/jottad
       - /home:/backup/home
-    ports:
-      - "14443:14443"
 ```
 
 ## Synology NAS (Container Manager)
 
-Jottacloud does not offer a native Synology package in the Package Center, and installing `jotta-cli` directly on DSM requires SSH access to the NAS and manual package management — steps that are error-prone, undone by DSM upgrades, and unsupported by Jottacloud. This image solves that: pull `stjernquist/jottacloud` from Docker Hub in Container Manager and you get a fully self-contained, auto-updating Jottacloud backup client without ever opening a terminal.
-
-The image also handles a common compatibility problem: `jottad` normally expects to run under systemd, which does not exist inside a container. This image sets `JOTTAD_SYSTEMD=0` so the daemon starts correctly in the Docker environment.
+This image is intended to avoid the usual Synology friction around manually installing and maintaining `jotta-cli` on DSM. The container also disables systemd integration (`JOTTAD_SYSTEMD=0`), which is required inside Docker.
 
 ### Setup
 
-1. **Get a login token** from [Jottacloud Settings → Security](https://www.jottacloud.com/web/secure).
-2. **Create a persistent config folder** on the NAS, e.g. `/volume1/docker/jottacloud`.
-3. In **Container Manager → Registry**, search for `stjernquist/jottacloud` and download the image.
-4. **Configure volumes** when creating the container:
+1. Get a login token from [Jottacloud Settings → Security](https://www.jottacloud.com/web/secure).
+2. Create a persistent folder on the NAS, for example `/volume1/docker/jottacloud`.
+3. In Container Manager, download `stjernquist/jottacloud`.
+4. Configure volumes:
 
    | Host path (Synology) | Container path | Purpose |
    |----------------------|----------------|---------|
-   | `/volume1/docker/jottacloud` | `/data/jottad` | Persistent config (required) |
+   | `/volume1/docker/jottacloud` | `/data/jottad` | Persistent Jottacloud state and config files |
    | `/volume1/homes` | `/backup/homes` | Backup |
    | `/volume1/documents` | `/backup/documents` | Backup |
-   | `/volume1/photos` | `/sync` | Sync |
+   | `/volume1/photos` | `/sync` | Optional sync |
 
-5. **Set environment variables**: `JOTTA_TOKEN`, `JOTTA_DEVICE`, `JOTTA_CONFIG_SCANINTERVAL`, `LOCALTIME`.
-6. `JOTTA_TOKEN` is only required on the **first start**. Once logged in, credentials are saved to the `/data/jottad` volume and the token is no longer needed.
+5. Set env vars such as `JOTTA_TOKEN`, `JOTTA_DEVICE`, `LOCALTIME`, and any `JOTTA_CONFIG_<SETTING>` overrides you want.
+6. Start the container once. It will create:
 
-### Synology Ignore Defaults (Enabled Automatically)
+   - `/volume1/docker/jottacloud/jotta-config.env`
+   - `/volume1/docker/jottacloud/ignorefile`
 
-Synology metadata/recycle folders are ignored by default:
+7. Edit those files if needed and restart the container.
 
-```text
-**/@eaDir
-**/@eaDir/**
-**/@tmp
-**/@tmp/**
-**/#recycle
-**/#recycle/**
-```
+`JOTTA_TOKEN` is only needed on the first successful login. Credentials persist in `/data/jottad`.
 
-You can still add your own patterns with `/config/ignorefile` (`JOTTA_IGNORE_FILE`) or inline via `JOTTA_IGNORE_PATTERNS`.
+## Managed Settings Behavior
 
-### Managed CLI Configuration
+At startup the container:
 
-At container startup, the entrypoint manages `jotta-cli config` values **only** from:
-1. `/config/jotta-config.env` (or `JOTTA_CONFIG_FILE`)
-2. `JOTTA_CONFIG_<SETTING>` environment variables
+1. reads `/data/jottad/jotta-config.env`
+2. applies `JOTTA_CONFIG_<SETTING>` overrides
+3. runs `jotta-cli config set <setting> <value>` for the managed settings it finds
 
-Priority: config file first, then env overrides (`JOTTA_CONFIG_<SETTING>` has higher priority).
-
-Examples:
-
-```bash
--e JOTTA_CONFIG_MAXUPLOADS=4
--e JOTTA_CONFIG_IGNOREHIDDENFILES=true
--e JOTTA_CONFIG_WEBHOOKSTATUSINTERVAL=1h
-```
-
-Or file-based:
-
-```text
-maxuploads=4
-maxdownloads=4
-ignorehiddenfiles=true
-uploadrate=2m
-```
-
-On restart, changed values are re-applied. If a previously managed setting is removed from env/file, it is reset to the documented CLI default for supported keys.
+If a previously managed setting is removed from both the file and env, the container resets it to the known CLI default for the settings it tracks internally.
 
 ## Debugging
 
 ```bash
-# Shell into a running container
 docker exec -it jottacloud bash
-
-# Check status
 docker exec jottacloud jotta-cli status
+docker exec jottacloud jotta-cli tail
+docker logs -f jottacloud
 ```
-
-For production troubleshooting, prefer one-off commands like `docker exec jottacloud jotta-cli status` or `docker logs -f jottacloud`. Long-lived interactive shells are fine for inspection, but repeatedly running `jotta-cli` commands during heavy scans can add avoidable load while `jottad` is already busy.
 
 ## Automated Updates
 
-This image is automatically rebuilt every Monday via GitHub Actions. Each rebuild pulls:
-- Latest Debian security patches (`apt-get upgrade`)
-- Latest Jottacloud CLI version from the official apt repository
+This image is rebuilt regularly. Each rebuild pulls:
 
-### Version naming
+- latest Debian security patches
+- latest Jottacloud CLI version available in the official apt repository
 
-- **GitHub releases** are tagged `v{jotta-cli-version}` (e.g. `v3.14.2`) and created automatically when a new CLI version is detected in the Jottacloud APT repo (checked daily at 08:00 UTC).
-- **Docker Hub tags**:
-  - `:latest` — updated on every build (weekly rebuilds + new CLI releases)
-  - `:{version}` (e.g. `:3.14.2`) — pinned tag created only when a new jotta-cli version is released
-
-To set up automated rebuilds in your own fork, add these GitHub repository secrets:
-- `DOCKERHUB_USERNAME` — your Docker Hub username
-- `DOCKERHUB_TOKEN` — a Docker Hub access token
+GitHub releases are tagged `v{jotta-cli-version}` and Docker Hub publishes `latest` plus versioned tags when a new CLI release is detected.
 
 ## Security
 
-- **Minimal base image:** `debian:trixie-slim` reduces attack surface
-- **No recommended packages:** `--no-install-recommends` keeps dependencies minimal
-- **Weekly rebuilds:** automated CI ensures OS and CLI stay patched
-- **Docker secrets support:** avoid passing tokens via environment variables in production
+- `debian:trixie-slim` base image
+- `--no-install-recommends` package installs
+- Docker secret support for `jotta_token`
+- persistent credentials kept in the mounted `/data/jottad` volume

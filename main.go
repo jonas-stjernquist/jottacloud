@@ -20,11 +20,7 @@ import (
 )
 
 const (
-	dataDir         = "/data/jottad"
-	configDir       = "/data/jotta-cli"
-	ignoreFilePath  = "/config/ignorefile"
-	configFilePath  = "/config/jotta-config.env"
-	secretTokenPath = "/run/secrets/jotta_token"
+	secretTokenPath        = "/run/secrets/jotta_token"
 	localtimeRoot          = "/usr/share/zoneinfo"
 	startupProbeTimeout    = time.Second
 	syncStatusTimeout      = 5 * time.Second
@@ -62,6 +58,13 @@ var (
 	// jottaCLI is overridable in tests; do not mutate in production code.
 	jottaCLI = "jotta-cli"
 
+	dataDir               = "/data/jottad"
+	configDir             = "/data/jottad/jotta-cli"
+	configFilePath        = "/data/jottad/jotta-config.env"
+	ignoreFilePath        = "/data/jottad/ignorefile"
+	rootJottadPath        = "/root/.jottad"
+	rootJottaCLIConfigDir = "/root/.config/jotta-cli"
+
 	errPtyTimeout    = errors.New("pty timeout")
 	errStatusTimeout = errors.New("status timeout")
 
@@ -80,20 +83,23 @@ var (
 	}
 
 	managedConfigDefaults = map[string]string{
-		"downloadrate":          "0",
-		"uploadrate":            "0",
-		"checksumreadrate":      "52m",
-		"checksumthreads":       "2",
-		"ignorehiddenfiles":     "false",
-		"maxuploads":            "6",
-		"maxdownloads":          "6",
-		"scaninterval":          "1h0m0s",
-		"webhookstatusinterval": "6h0m0s",
-		"logscanignores":        "false",
-		"slowmomode":            "0",
-		"logtransfers":          "false",
-		"screenshotscapture":    "false",
-		"syncpaused":            "false",
+		"downloadrate":             "0",
+		"uploadrate":               "0",
+		"checksumreadrate":         "52m",
+		"checksumthreads":          "2",
+		"ignorehiddenfiles":        "false",
+		"maxuploads":               "6",
+		"maxdownloads":             "6",
+		"scaninterval":             "1h0m0s",
+		"webhookstatusinterval":    "6h0m0s",
+		"logscanignores":           "false",
+		"slowmomode":               "0",
+		"logtransfers":             "false",
+		"screenshotscapture":       "false",
+		"sharecapturedscreenshots": "false",
+		"syncpaused":               "false",
+		"timeformat":               "RFC3339",
+		"usesiunits":               "false",
 	}
 )
 
@@ -239,7 +245,7 @@ func (a app) run(ctx context.Context, args []string) error {
 }
 
 func (a app) waitForStartup(ctx context.Context) error {
-	startupTimeout := envInt("STARTUP_TIMEOUT", 15)
+	startupTimeout := envInt("STARTUP_TIMEOUT", 30)
 	fmt.Fprintf(a.stdout, "Waiting for jottad to start (timeout: %ds). ", startupTimeout)
 
 	for remaining := startupTimeout; remaining > 0; remaining-- {
@@ -421,17 +427,12 @@ func (a app) applyManagedIgnores() error {
 }
 
 func (a app) desiredIgnorePatterns() ([]string, error) {
-	filePath := strings.TrimSpace(a.getenv("JOTTA_IGNORE_FILE"))
-	if filePath == "" {
-		filePath = ignoreFilePath
-	}
-
-	desired := append([]string{}, defaultIgnorePatterns...)
-	patternsFromFile, err := readIgnoreFile(filePath)
+	// Patterns come entirely from ignoreFilePath; defaults are seeded into that file on first start.
+	patternsFromFile, err := readIgnoreFile(ignoreFilePath)
 	if err != nil {
 		return nil, err
 	}
-	desired = append(desired, patternsFromFile...)
+	desired := append([]string{}, patternsFromFile...)
 	if inline := strings.TrimSpace(a.getenv("JOTTA_IGNORE_PATTERNS")); inline != "" {
 		desired = append(desired, parsePatternList(inline)...)
 	}
@@ -481,12 +482,7 @@ func (a app) applyManagedConfig() error {
 }
 
 func (a app) desiredConfigSettings() (map[string]string, error) {
-	filePath := strings.TrimSpace(a.getenv("JOTTA_CONFIG_FILE"))
-	if filePath == "" {
-		filePath = configFilePath
-	}
-
-	desired, err := readConfigFile(filePath)
+	desired, err := readConfigFile(configFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -897,17 +893,23 @@ func preparePersistentPaths() error {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("create %s: %w", dataDir, err)
 	}
-	if err := forceSymlink(dataDir, "/root/.jottad"); err != nil {
+	if err := forceSymlink(dataDir, rootJottadPath); err != nil {
 		return err
 	}
 
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("create %s: %w", configDir, err)
 	}
-	if err := os.MkdirAll("/root/.config", 0755); err != nil {
-		return fmt.Errorf("create /root/.config: %w", err)
+	if err := os.MkdirAll(filepath.Dir(rootJottaCLIConfigDir), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(rootJottaCLIConfigDir), err)
 	}
-	if err := forceSymlink(configDir, "/root/.config/jotta-cli"); err != nil {
+	if err := forceSymlink(configDir, rootJottaCLIConfigDir); err != nil {
+		return err
+	}
+	if err := ensureFileWithContent(configFilePath, defaultConfigFileContent()); err != nil {
+		return err
+	}
+	if err := ensureFileWithContent(ignoreFilePath, defaultIgnoreFileContent()); err != nil {
 		return err
 	}
 	return nil
@@ -949,6 +951,81 @@ func formatCommandError(name string, args []string, out string, err error) error
 	return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 }
 
+func defaultConfigFileContent() string {
+	lines := []string{
+		"# Managed jotta-cli config for this container.",
+		"# Uncomment only the settings you want this container to apply on startup.",
+		"# Environment variables named JOTTA_CONFIG_<SETTING> override values in this file.",
+		"# Lines starting with # are treated as comments.",
+		"",
+		"# Transfer and checksum limits",
+		"# downloadrate=0",
+		"# uploadrate=0",
+		"# checksumreadrate=52m",
+		"# checksumthreads=2",
+		"",
+		"# Concurrency and scheduling",
+		"# maxuploads=6",
+		"# maxdownloads=6",
+		"# scaninterval=1h0m0s",
+		"# webhookstatusinterval=6h0m0s",
+		"# slowmomode=0",
+		"",
+		"# Filtering and logging",
+		"# ignorehiddenfiles=false",
+		"# logscanignores=false",
+		"# logtransfers=false",
+		"",
+		"# Screenshot and sync behavior",
+		"# screenshotscapture=false",
+		"# sharecapturedscreenshots=false",
+		"# syncpaused=false",
+		"",
+		"# Formatting",
+		"# timeformat=RFC3339",
+		"# usesiunits=false",
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func defaultIgnoreFileContent() string {
+	lines := []string{
+		"# Managed ignore patterns for this container.",
+		"# Edit this file to keep or remove the default Synology patterns.",
+		"# JOTTA_IGNORE_PATTERNS adds more patterns on top of the rules in this file.",
+		"",
+	}
+	lines = append(lines, defaultIgnorePatterns...)
+	lines = append(lines,
+		"",
+		"# Example custom pattern",
+		"# **/node_modules",
+	)
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func ensureFileWithContent(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("prepare %s: %w", filepath.Dir(path), err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func isCommentLine(line string) bool {
+	return strings.HasPrefix(line, "#")
+}
+
 func loadEnvFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -959,7 +1036,7 @@ func loadEnvFile(path string) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || isCommentLine(line) {
 			continue
 		}
 		line = strings.TrimPrefix(line, "export ")
@@ -974,6 +1051,9 @@ func loadEnvFile(path string) {
 }
 
 func forceSymlink(target, link string) error {
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		return fmt.Errorf("prepare parent for %s: %w", link, err)
+	}
 	info, err := os.Lstat(link)
 	switch {
 	case err == nil:
@@ -1051,7 +1131,7 @@ func readIgnoreFile(path string) ([]string, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || isCommentLine(line) {
 			continue
 		}
 		patterns = append(patterns, line)
@@ -1076,7 +1156,7 @@ func readConfigFile(path string) (map[string]string, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || isCommentLine(line) {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)
@@ -1108,7 +1188,7 @@ func parseConfigEnvOverrides(environ []string) map[string]string {
 		if value == "" {
 			continue
 		}
-		if !strings.HasPrefix(key, "JOTTA_CONFIG_") || key == "JOTTA_CONFIG_FILE" {
+		if !strings.HasPrefix(key, "JOTTA_CONFIG_") {
 			continue
 		}
 		normalized := normalizeConfigKey(strings.TrimPrefix(key, "JOTTA_CONFIG_"))

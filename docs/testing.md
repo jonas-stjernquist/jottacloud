@@ -109,7 +109,7 @@ cd test
 | `test-first-login.sh` | Clean-state login: removes data dir, starts container, verifies login and device name |
 | `test-backup-dirs.sh` | Backup directory registration: verifies `/backup/documents` appears in `jotta-cli ls` |
 | `test-sync-setup.sh` | Sync directory setup: verifies "Adding sync directory" appears in logs |
-| `test-scan-interval.sh` | Scan interval: verifies "Setting scan interval to 1m" appears in logs |
+| `test-scan-interval.sh` | Scan interval: verifies "Setting config scaninterval=1m." appears in logs |
 
 ### Test data
 
@@ -121,9 +121,9 @@ test/
 ├── compose.yml           # Podman compose for tests
 ├── backup/documents/     # Test files for backup
 ├── sync/                 # Test file for sync
-├── config/ignorefile     # Test ignore patterns
+├── data/jottad/          # Persistent state plus generated config files
 ├── scripts/              # Test scripts
-└── data/                 # (git-ignored) Persistent state during tests
+└── data/                 # Persistent state during tests
 ```
 
 ### Environment
