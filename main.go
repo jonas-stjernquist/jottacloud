@@ -1191,14 +1191,14 @@ func parseConfigEnvOverrides(environ []string) map[string]string {
 			continue
 		}
 		key := parts[0]
+		if _, blocked := configEnvBlocklist[key]; blocked {
+			continue
+		}
 		value := strings.TrimSpace(parts[1])
 		if value == "" {
 			continue
 		}
 		if !strings.HasPrefix(key, "JOTTA_CONFIG_") {
-			continue
-		}
-		if _, blocked := configEnvBlocklist[key]; blocked {
 			continue
 		}
 		normalized := normalizeConfigKey(strings.TrimPrefix(key, "JOTTA_CONFIG_"))
