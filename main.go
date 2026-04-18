@@ -427,6 +427,7 @@ func (a app) applyManagedIgnores() error {
 }
 
 func (a app) desiredIgnorePatterns() ([]string, error) {
+	// Patterns come entirely from ignoreFilePath; defaults are seeded into that file on first start.
 	patternsFromFile, err := readIgnoreFile(ignoreFilePath)
 	if err != nil {
 		return nil, err
@@ -1004,16 +1005,18 @@ func defaultIgnoreFileContent() string {
 }
 
 func ensureFileWithContent(path, content string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat %s: %w", path, err)
-	}
-
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("prepare %s: %w", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

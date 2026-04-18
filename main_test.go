@@ -824,7 +824,7 @@ func writeTempFile(t *testing.T, content string) string {
 	return f.Name()
 }
 
-func withManagedPaths(t *testing.T) string {
+func withManagedPaths(t *testing.T) {
 	t.Helper()
 	baseDir := t.TempDir()
 
@@ -851,7 +851,6 @@ func withManagedPaths(t *testing.T) string {
 		rootJottaCLIConfigDir = oldRootJottaCLIConfigDir
 	})
 
-	return baseDir
 }
 
 func assertEnv(t *testing.T, key, want string) {
