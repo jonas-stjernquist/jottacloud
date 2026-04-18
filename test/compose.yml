@@ -10,7 +10,6 @@ services:
       - LOCALTIME=Europe/Stockholm
     volumes:
       - ./data/jottad:/data/jottad
-      - ./data/jotta-cli:/data/jotta-cli
       - ./backup:/backup
       - ./sync:/sync
     ports:

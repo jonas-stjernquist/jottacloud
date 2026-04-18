@@ -836,7 +836,7 @@ func withManagedPaths(t *testing.T) {
 	oldRootJottaCLIConfigDir := rootJottaCLIConfigDir
 
 	dataDir = filepath.Join(baseDir, "data", "jottad")
-	configDir = filepath.Join(baseDir, "data", "jotta-cli")
+	configDir = filepath.Join(dataDir, "jotta-cli")
 	configFilePath = filepath.Join(dataDir, "jotta-config.env")
 	ignoreFilePath = filepath.Join(dataDir, "ignorefile")
 	rootJottadPath = filepath.Join(baseDir, "root", ".jottad")

@@ -18,7 +18,7 @@ if wait_for_startup 90; then
     pass "Container started"
 
     logs="$(container_logs 2>&1)"
-    assert_contains "$logs" "Setting scan interval to 1m" "scan interval configured"
+    assert_contains "$logs" "Setting config scaninterval=1m." "scan interval configured"
 else
     fail "Container did not start"
 fi

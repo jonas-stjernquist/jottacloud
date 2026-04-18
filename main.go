@@ -59,7 +59,7 @@ var (
 	jottaCLI = "jotta-cli"
 
 	dataDir               = "/data/jottad"
-	configDir             = "/data/jotta-cli"
+	configDir             = "/data/jottad/jotta-cli"
 	configFilePath        = "/data/jottad/jotta-config.env"
 	ignoreFilePath        = "/data/jottad/ignorefile"
 	rootJottadPath        = "/root/.jottad"
@@ -88,8 +88,8 @@ var (
 		"checksumreadrate":         "52m",
 		"checksumthreads":          "2",
 		"ignorehiddenfiles":        "false",
-		"maxuploads":               "6",
-		"maxdownloads":             "6",
+		"maxuploads":               "12",
+		"maxdownloads":             "12",
 		"scaninterval":             "1h0m0s",
 		"webhookstatusinterval":    "6h0m0s",
 		"logscanignores":           "false",
@@ -965,8 +965,8 @@ func defaultConfigFileContent() string {
 		"# checksumthreads=2",
 		"",
 		"# Concurrency and scheduling",
-		"# maxuploads=6",
-		"# maxdownloads=6",
+		"# maxuploads=12",
+		"# maxdownloads=12",
 		"# scaninterval=1h0m0s",
 		"# webhookstatusinterval=6h0m0s",
 		"# slowmomode=0",

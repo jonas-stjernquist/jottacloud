@@ -50,8 +50,8 @@ Example generated content:
 # uploadrate=0
 # checksumreadrate=52m
 # checksumthreads=2
-# maxuploads=6
-# maxdownloads=6
+# maxuploads=12
+# maxdownloads=12
 # scaninterval=1h0m0s
 # webhookstatusinterval=6h0m0s
 # ignorehiddenfiles=false
