@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -834,6 +835,7 @@ func withManagedPaths(t *testing.T) {
 	oldIgnoreFilePath := ignoreFilePath
 	oldRootJottadPath := rootJottadPath
 	oldRootJottaCLIConfigDir := rootJottaCLIConfigDir
+	oldSyncRootMountPath := syncRootMountPath
 
 	dataDir = filepath.Join(baseDir, "data", "jottad")
 	configDir = filepath.Join(dataDir, "jotta-cli")
@@ -841,6 +843,7 @@ func withManagedPaths(t *testing.T) {
 	ignoreFilePath = filepath.Join(dataDir, "ignorefile")
 	rootJottadPath = filepath.Join(baseDir, "root", ".jottad")
 	rootJottaCLIConfigDir = filepath.Join(baseDir, "root", ".config", "jotta-cli")
+	syncRootMountPath = filepath.Join(baseDir, "sync")
 
 	t.Cleanup(func() {
 		dataDir = oldDataDir
@@ -849,6 +852,7 @@ func withManagedPaths(t *testing.T) {
 		ignoreFilePath = oldIgnoreFilePath
 		rootJottadPath = oldRootJottadPath
 		rootJottaCLIConfigDir = oldRootJottaCLIConfigDir
+		syncRootMountPath = oldSyncRootMountPath
 	})
 
 }
@@ -1008,7 +1012,7 @@ func TestEnsureSyncConfigured_ContinuesOnStatusProbeError(t *testing.T) {
 	if err := a.ensureSyncConfigured(); err != nil {
 		t.Fatalf("ensureSyncConfigured error = %v, want nil", err)
 	}
-	if runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", "/sync"})) {
+	if runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
 		t.Fatal("did not expect sync setup PTY call")
 	}
 	if !strings.Contains(stdout.String(), "sync status probe failed") {
@@ -1034,7 +1038,7 @@ func TestEnsureSyncConfigured_SetsUpWhenSyncDisabled(t *testing.T) {
 	if err := a.ensureSyncConfigured(); err != nil {
 		t.Fatalf("ensureSyncConfigured error = %v, want nil", err)
 	}
-	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", "/sync"})) {
+	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
 		t.Fatal("expected sync setup PTY call")
 	}
 }
@@ -1042,7 +1046,7 @@ func TestEnsureSyncConfigured_SetsUpWhenSyncDisabled(t *testing.T) {
 func TestApplyManagedConfig_FailsOnCommandError(t *testing.T) {
 	runner := &fakeRunner{
 		runResults: map[string][]fakeCmdResult{
-			cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1m"}): {
+			cmdKey(jottaCLI, []string{"config", "scaninterval", "1m"}): {
 				{output: "bad config", err: errors.New("exit status 2")},
 			},
 		},
@@ -1202,7 +1206,7 @@ func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
 	}
 
 	runner := &fakeRunner{runResults: map[string][]fakeCmdResult{
-		cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1h0m0s"}): {
+		cmdKey(jottaCLI, []string{"config", "scaninterval", "1h0m0s"}): {
 			{output: "", err: nil},
 		},
 	}}
@@ -1218,8 +1222,341 @@ func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
 	if err := a.applyManagedConfig(); err != nil {
 		t.Fatal(err)
 	}
-	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "set", "scaninterval", "1h0m0s"})) {
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "scaninterval", "1h0m0s"})) {
 		t.Fatal("expected scaninterval reset to default")
+	}
+}
+
+func TestApplyManagedConfig_ResetsMaxTransfersToCurrentDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldPath := managedConfigStatePath
+	managedConfigStatePath = filepath.Join(tmpDir, "managed-config.state")
+	t.Cleanup(func() { managedConfigStatePath = oldPath })
+	if err := os.WriteFile(managedConfigStatePath, []byte("maxuploads=3\nmaxdownloads=4\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{runResults: map[string][]fakeCmdResult{
+		cmdKey(jottaCLI, []string{"config", "maxuploads", "12"}): {
+			{output: "", err: nil},
+		},
+		cmdKey(jottaCLI, []string{"config", "maxdownloads", "12"}): {
+			{output: "", err: nil},
+		},
+	}}
+	a := app{
+		runner:  runner,
+		stdout:  io.Discard,
+		stderr:  io.Discard,
+		sleep:   func(time.Duration) {},
+		getenv:  func(string) string { return "" },
+		environ: func() []string { return nil },
+	}
+
+	if err := a.applyManagedConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "maxuploads", "12"})) {
+		t.Fatal("expected maxuploads reset to current default")
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "maxdownloads", "12"})) {
+		t.Fatal("expected maxdownloads reset to current default")
+	}
+}
+
+func TestConfigureSync_EmptyMountedDirectoryTriggersSetup(t *testing.T) {
+	withManagedPaths(t)
+	if err := os.MkdirAll(syncRootMountPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: statusSyncDisabled, err: errors.New("exit status 1")},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.configureSync(); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
+		t.Fatal("expected sync setup for empty mounted directory")
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"sync", "start"})) {
+		t.Fatal("expected sync start after setup")
+	}
+}
+
+func TestConfigureSync_MissingMountSkipsWithoutState(t *testing.T) {
+	withManagedPaths(t)
+
+	a := app{
+		runner:          &fakeRunner{},
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.configureSync(); err != nil {
+		t.Fatalf("configureSync error = %v, want nil", err)
+	}
+}
+
+func TestConfigureSync_MissingMountFailsWhenStateExists(t *testing.T) {
+	withManagedPaths(t)
+	if err := os.MkdirAll(filepath.Dir(syncRootStatePath()), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(syncRootStatePath(), []byte("/previous-sync\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := app{
+		runner:          &fakeRunner{},
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.configureSync()
+	if err == nil || !strings.Contains(err.Error(), "not mounted") {
+		t.Fatalf("configureSync error = %v, want missing mount error", err)
+	}
+}
+
+func TestConfigureSync_ReconfiguresMismatchedRoot(t *testing.T) {
+	withManagedPaths(t)
+	if err := os.MkdirAll(filepath.Dir(syncRootStatePath()), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(syncRootStatePath(), []byte("/old-sync\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(syncRootMountPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: statusSyncDisabled, err: errors.New("exit status 1")},
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.configureSync(); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"sync", "reset"})) {
+		t.Fatal("expected sync reset before reconfiguration")
+	}
+	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
+		t.Fatal("expected sync setup for canonical mount path")
+	}
+	if !strings.Contains(stdout.String(), "Sync root changed from /old-sync") {
+		t.Fatalf("expected sync reconfiguration log, got %q", stdout.String())
+	}
+}
+
+func TestConfigureSync_ExistingCanonicalRootStartsWithoutSetup(t *testing.T) {
+	withManagedPaths(t)
+	if err := os.MkdirAll(filepath.Dir(syncRootStatePath()), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(syncRootStatePath(), []byte(syncRootMountPath+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(syncRootMountPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: "ready", err: nil},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.configureSync(); err != nil {
+		t.Fatal(err)
+	}
+	if runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
+		t.Fatal("did not expect sync setup for canonical persisted root")
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"sync", "start"})) {
+		t.Fatal("expected sync start")
+	}
+}
+
+func TestRotatingFileWriter_AppendsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "container.log")
+
+	w, err := newRotatingFileWriter(path, 100, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err = newRotatingFileWriter(path, 100, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(" world")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readFile(t, path); got != "hello world" {
+		t.Fatalf("log content = %q, want %q", got, "hello world")
+	}
+}
+
+func TestRotatingFileWriter_RotatesAndCapsBackups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "container.log")
+	w, err := newRotatingFileWriter(path, 10, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	for i := 0; i < 7; i++ {
+		if _, err := w.Write([]byte(fmt.Sprintf("%09d\n", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected active log file: %v", err)
+	}
+	for i := 1; i <= 4; i++ {
+		if _, err := os.Stat(fmt.Sprintf("%s.%d", path, i)); err != nil {
+			t.Fatalf("expected rotated log %d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(path + ".5"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected oldest rotated log to be discarded, got err=%v", err)
+	}
+	if got := strings.TrimSpace(readFile(t, path)); got != "000000006" {
+		t.Fatalf("active log = %q, want latest record", got)
+	}
+}
+
+func TestHealthcheck_Healthy(t *testing.T) {
+	a := app{
+		runner: &fakeRunner{
+			statusResults: []fakeCmdResult{{output: "ready", err: nil}},
+		},
+	}
+
+	if err := a.healthcheck(); err != nil {
+		t.Fatalf("healthcheck error = %v, want nil", err)
+	}
+}
+
+func TestRun_HealthcheckPreparesPersistentPaths(t *testing.T) {
+	withManagedPaths(t)
+
+	a := app{
+		runner: &fakeRunner{
+			statusResults: []fakeCmdResult{{output: "ready", err: nil}},
+		},
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          envMap("LOCALTIME", ""),
+		environ:         func() []string { return nil },
+		setenv:          os.Setenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	if err := a.run(context.Background(), []string{"healthcheck"}); err != nil {
+		t.Fatalf("run healthcheck error = %v, want nil", err)
+	}
+
+	if got := readFile(t, configFilePath); !strings.Contains(got, "# maxuploads=12") {
+		t.Fatalf("config file = %q, want current default maxuploads template", got)
+	}
+	if _, err := os.Stat(ignoreFilePath); err != nil {
+		t.Fatalf("expected ignore file to be prepared: %v", err)
+	}
+	if target, err := os.Readlink(rootJottadPath); err != nil || target != dataDir {
+		t.Fatalf("root jottad symlink = %q, %v, want %q", target, err, dataDir)
+	}
+	if target, err := os.Readlink(rootJottaCLIConfigDir); err != nil || target != configDir {
+		t.Fatalf("root config symlink = %q, %v, want %q", target, err, configDir)
+	}
+}
+
+func TestHealthcheck_FatalStatuses(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "not logged in", output: statusNotLoggedIn},
+		{name: "session revoked", output: statusSessionRevoked},
+		{name: "device missing", output: statusDeviceMissing},
+		{name: "device name missing", output: statusNoDeviceName},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := app{
+				runner: &fakeRunner{
+					statusResults: []fakeCmdResult{{output: tt.output, err: errors.New("exit status 1")}},
+				},
+			}
+			if err := a.healthcheck(); err == nil || !strings.Contains(err.Error(), "unhealthy status") {
+				t.Fatalf("healthcheck error = %v, want unhealthy status", err)
+			}
+		})
+	}
+}
+
+func TestHealthcheck_TimeoutFailure(t *testing.T) {
+	a := app{
+		runner: &fakeRunner{
+			statusResults: []fakeCmdResult{{output: "", err: errStatusTimeout}},
+		},
+	}
+
+	if err := a.healthcheck(); err == nil || !strings.Contains(err.Error(), "status probe failed") {
+		t.Fatalf("healthcheck error = %v, want probe failure", err)
 	}
 }
 

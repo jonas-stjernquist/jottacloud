@@ -123,8 +123,8 @@ Glob: `*` (not `/`), `**` (everything), `**/` (zero+ dirs). Hardcoded: `**.DS_St
 
 ### Scan Interval
 ```bash
-jotta-cli config set scaninterval 30m     # 30 minutes
-jotta-cli config set scaninterval 0       # realtime (filesystem triggers)
+jotta-cli config scaninterval 30m         # 30 minutes
+jotta-cli config scaninterval 0           # realtime (filesystem triggers)
 ```
 
 ---
@@ -138,7 +138,7 @@ jotta-cli sync stop                           # Stop sync
 jotta-cli sync trigger                        # One-time sync
 jotta-cli sync move /new/path                 # Move (NEVER move manually!)
 jotta-cli sync reset                          # Reset config (files NOT deleted)
-jotta-cli config set syncpaused true|false    # Pause/unpause
+jotta-cli config syncpaused true|false        # Pause/unpause
 jotta-cli sync log -n20                       # Last 20 entries
 jotta-cli sync log --watch                    # Stream entries
 jotta-cli observe --sync                      # Watch transfers
@@ -168,7 +168,7 @@ Files stored under `Archive/<device-name>/` by default.
 
 ```bash
 jotta-cli config                    # View all
-jotta-cli config set <key> <value>  # Set value
+jotta-cli config <key> <value>      # Set value
 ```
 
 | Setting | Default | Description |
@@ -239,7 +239,7 @@ Default: jottad listens on 127.0.0.1. Set `ListenAddr=0.0.0.0` in config file fo
 ```bash
 jotta-cli webhook add <url>       # Add (sends test message immediately)
 jotta-cli webhook rem <url>       # Remove
-jotta-cli config set webhookstatusinterval 1h
+jotta-cli config webhookstatusinterval 1h
 ```
 
 Events: start, stop, periodic status. JSON payload in Slack format.

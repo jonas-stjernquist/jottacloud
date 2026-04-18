@@ -84,7 +84,7 @@ jotta-cli sync start|stop|trigger            # Manage sync
 jotta-cli archive "/path" [--nogui]          # Upload to archive
 jotta-cli download Remote/path ~/local       # Download from cloud
 jotta-cli config                             # View all settings
-jotta-cli config set <key> <value>           # Change setting
+jotta-cli config <key> <value>               # Change setting
 jotta-cli observe [--sync|--downloads]       # Watch transfers
 jotta-cli pause 5m | jotta-cli resume        # Pause/resume
 jotta-cli ignores add --pattern "**.log"     # Ignore pattern
