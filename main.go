@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ const (
 	localtimeRoot          = "/usr/share/zoneinfo"
 	startupProbeTimeout    = time.Second
 	syncStatusTimeout      = 5 * time.Second
+	healthcheckTimeout     = 5 * time.Second
 	loginTimeout           = 20 * time.Second
 	logoutTimeout          = 20 * time.Second
 	devicePromptTimeout    = 10 * time.Second
@@ -51,6 +53,9 @@ const (
 	queryOSC11             = "\x1b]11;?\x1b\\"
 	replyDSR               = "\x1b[1;1R"
 	replyOSC11             = "\x1b]11;rgb:0000/0000/0000\x1b\\"
+	containerLogName       = "container.log"
+	containerLogMaxBytes   = 10 * 1024 * 1024
+	containerLogBackups    = 4
 )
 
 var (
@@ -64,6 +69,7 @@ var (
 	ignoreFilePath        = "/data/jottad/ignorefile"
 	rootJottadPath        = "/root/.jottad"
 	rootJottaCLIConfigDir = "/root/.config/jotta-cli"
+	syncRootMountPath     = "/sync"
 
 	errPtyTimeout    = errors.New("pty timeout")
 	errStatusTimeout = errors.New("status timeout")
@@ -88,8 +94,8 @@ var (
 		"checksumreadrate":         "52m",
 		"checksumthreads":          "2",
 		"ignorehiddenfiles":        "false",
-		"maxuploads":               "6",
-		"maxdownloads":             "6",
+		"maxuploads":               "12",
+		"maxdownloads":             "12",
 		"scaninterval":             "1h0m0s",
 		"webhookstatusinterval":    "6h0m0s",
 		"logscanignores":           "false",
@@ -159,14 +165,30 @@ type asyncProcess struct {
 	done chan error
 }
 
+type rotatingFileWriter struct {
+	mu         sync.Mutex
+	path       string
+	maxBytes   int64
+	maxBackups int
+	file       *os.File
+	size       int64
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	stdout, stderr, logWriter, err := configureAppOutputs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+	defer logWriter.Close()
+
 	a := app{
 		runner:          execRunner{},
-		stdout:          os.Stdout,
-		stderr:          os.Stderr,
+		stdout:          stdout,
+		stderr:          stderr,
 		sleep:           time.Sleep,
 		getenv:          os.Getenv,
 		environ:         os.Environ,
@@ -181,8 +203,8 @@ func main() {
 }
 
 func (a app) run(ctx context.Context, args []string) error {
-	loadEnvFile(filepath.Join(dataDir, "jottad.env"))
-	a.configureMonitor()
+	loadEnvFile(filepath.Join(dataDir, "jottad.env"), a.setenv)
+	a.monitorInterval = configureMonitor(a.getenv, a.monitorInterval)
 
 	if token, err := os.ReadFile(secretTokenPath); err == nil {
 		if trimmed := strings.TrimSpace(string(token)); trimmed != "" && a.setenv != nil {
@@ -190,15 +212,21 @@ func (a app) run(ctx context.Context, args []string) error {
 		}
 	}
 
-	if err := configureLocaltime(a.getenv("LOCALTIME")); err != nil {
-		fmt.Fprintf(a.stderr, "warning: %v\n", err)
+	if len(args) == 1 && args[0] == "healthcheck" {
+		if err := preparePersistentPaths(); err != nil {
+			return err
+		}
+		return a.healthcheck()
 	}
-
 	if len(args) == 1 && args[0] == "bash" {
 		if a.getenv("JOTTA_DEV") != "1" {
 			return errors.New("bash subcommand requires JOTTA_DEV=1")
 		}
 		return runBash()
+	}
+
+	if err := configureLocaltime(a.getenv("LOCALTIME")); err != nil {
+		fmt.Fprintf(a.stderr, "warning: %v\n", err)
 	}
 
 	if err := preparePersistentPaths(); err != nil {
@@ -210,8 +238,6 @@ func (a app) run(ctx context.Context, args []string) error {
 		return fmt.Errorf("start jottad: %w", err)
 	}
 	defer terminateProcess(jottad, shutdownGracePeriod)
-
-	a.sleep(time.Second)
 
 	if err := a.waitForStartup(ctx); err != nil {
 		return err
@@ -262,8 +288,11 @@ func (a app) waitForStartup(ctx context.Context) error {
 			return nil
 		}
 
-		fmt.Fprintln(a.stdout, "Could not start jottad. Checking why.")
-		if err := a.handleStartupStatus(classifyStatus(out)); err != nil {
+		status := classifyStatus(out)
+		if status != statusUnknown {
+			fmt.Fprintln(a.stdout, "Could not start jottad. Checking why.")
+		}
+		if err := a.handleStartupStatus(status); err != nil {
 			return err
 		}
 
@@ -335,7 +364,13 @@ func (a app) configureBackupsIn(globPattern string) error {
 	addedAny := false
 	for _, dir := range matches {
 		fi, statErr := os.Stat(dir)
-		if statErr != nil || !fi.IsDir() {
+		if statErr != nil {
+			if !errors.Is(statErr, os.ErrNotExist) {
+				fmt.Fprintf(a.stdout, "Warning: cannot access backup directory %s: %v\n", dir, statErr)
+			}
+			continue
+		}
+		if !fi.IsDir() {
 			continue
 		}
 		out, err := a.runChecked(jottaCLI, "add", dir)
@@ -355,21 +390,31 @@ func (a app) configureBackupsIn(globPattern string) error {
 }
 
 func (a app) configureSync() error {
-	fi, err := os.Stat("/sync")
-	if err != nil || !fi.IsDir() {
-		return nil
-	}
-
-	entries, err := os.ReadDir("/sync")
+	persistedRoot, err := readPersistedSyncRoot()
 	if err != nil {
-		fmt.Fprintf(a.stdout, "Warning: unable to read /sync, skipping sync setup: %v\n", err)
-		return nil
-	}
-	if len(entries) == 0 {
-		return nil
+		return err
 	}
 
-	fmt.Fprintln(a.stdout, "Adding sync directory.")
+	fi, statErr := os.Stat(syncRootMountPath)
+	switch {
+	case errors.Is(statErr, os.ErrNotExist):
+		if persistedRoot == "" {
+			return nil
+		}
+		return fmt.Errorf("sync is configured for %q but %s is not mounted; mount a directory at %s or reset sync state", persistedRoot, syncRootMountPath, syncRootMountPath)
+	case statErr != nil:
+		return fmt.Errorf("stat %s: %w", syncRootMountPath, statErr)
+	case !fi.IsDir():
+		return fmt.Errorf("%s exists but is not a directory", syncRootMountPath)
+	}
+
+	fmt.Fprintf(a.stdout, "Configuring sync directory at %s.\n", syncRootMountPath)
+	if persistedRoot != "" && persistedRoot != syncRootMountPath {
+		if err := a.reconfigureSyncRoot(persistedRoot); err != nil {
+			return err
+		}
+	}
+
 	if err := a.ensureSyncConfigured(); err != nil {
 		return err
 	}
@@ -378,10 +423,173 @@ func (a app) configureSync() error {
 	return err
 }
 
+func (a app) reconfigureSyncRoot(oldRoot string) error {
+	fmt.Fprintf(a.stdout, "Sync root changed from %s to %s. Resetting local sync state.\n", oldRoot, syncRootMountPath)
+	if _, err := a.runChecked(jottaCLI, "sync", "reset"); err != nil {
+		return fmt.Errorf("reset sync root %s: %w", oldRoot, err)
+	}
+	return nil
+}
+
+func (a app) healthcheck() error {
+	out, err := a.runner.Status(healthcheckTimeout)
+	if kind := classifyStatus(out); kind != statusUnknown {
+		return fmt.Errorf("unhealthy status %s: %s", kind, strings.TrimSpace(out))
+	}
+	if err != nil {
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			return fmt.Errorf("status probe failed: %s", trimmed)
+		}
+		return fmt.Errorf("status probe failed: %w", err)
+	}
+	return nil
+}
+
+func readPersistedSyncRoot() (string, error) {
+	content, err := os.ReadFile(syncRootStatePath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read sync root state: %w", err)
+	}
+	return strings.TrimSpace(string(content)), nil
+}
+
+func syncRootStatePath() string {
+	return filepath.Join(dataDir, "sync", "root")
+}
+
+func containerLogPath() string {
+	return filepath.Join(dataDir, containerLogName)
+}
+
+func configureAppOutputs() (io.Writer, io.Writer, io.Closer, error) {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return nil, nil, nil, fmt.Errorf("prepare %s: %w", dataDir, err)
+	}
+
+	logWriter, err := newRotatingFileWriter(containerLogPath(), containerLogMaxBytes, containerLogBackups)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return io.MultiWriter(os.Stdout, logWriter), io.MultiWriter(os.Stderr, logWriter), logWriter, nil
+}
+
+func newRotatingFileWriter(path string, maxBytes int64, maxBackups int) (*rotatingFileWriter, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("rotating log size must be positive")
+	}
+	if maxBackups < 0 {
+		return nil, errors.New("rotating log backup count must be non-negative")
+	}
+	w := &rotatingFileWriter{
+		path:       path,
+		maxBytes:   maxBytes,
+		maxBackups: maxBackups,
+	}
+	if err := w.open(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *rotatingFileWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.file == nil {
+		if err := w.open(); err != nil {
+			return 0, err
+		}
+	}
+	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
+		if err := w.rotate(); err != nil {
+			return 0, err
+		}
+	}
+
+	n, err := w.file.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *rotatingFileWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	w.size = 0
+	return err
+}
+
+func (w *rotatingFileWriter) open() error {
+	if err := os.MkdirAll(filepath.Dir(w.path), 0755); err != nil {
+		return fmt.Errorf("prepare log dir: %w", err)
+	}
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", w.path, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("stat log file %s: %w", w.path, err)
+	}
+	w.file = f
+	w.size = info.Size()
+	return nil
+}
+
+func (w *rotatingFileWriter) rotate() error {
+	if w.file != nil {
+		if err := w.file.Close(); err != nil {
+			return fmt.Errorf("close log file: %w", err)
+		}
+		w.file = nil
+	}
+
+	if w.maxBackups > 0 {
+		if err := os.Remove(w.rotatedPath(w.maxBackups)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove rotated log %s: %w", w.rotatedPath(w.maxBackups), err)
+		}
+		for i := w.maxBackups - 1; i >= 1; i-- {
+			src := w.rotatedPath(i)
+			dst := w.rotatedPath(i + 1)
+			if err := os.Rename(src, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("rotate %s -> %s: %w", src, dst, err)
+			}
+		}
+		if err := os.Rename(w.path, w.rotatedPath(1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("rotate active log %s: %w", w.path, err)
+		}
+	}
+	return w.openTruncated()
+}
+
+func (w *rotatingFileWriter) openTruncated() error {
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("open fresh log file %s: %w", w.path, err)
+	}
+	w.file = f
+	w.size = 0
+	return nil
+}
+
+func (w *rotatingFileWriter) rotatedPath(index int) string {
+	return fmt.Sprintf("%s.%d", w.path, index)
+}
+
 func (a app) ensureSyncConfigured() error {
 	out, err := a.runner.Status(syncStatusTimeout)
 	if strings.Contains(out, statusSyncDisabled) {
-		if err := a.runner.PtyRun(jottaCLI, []string{"sync", "setup", "--root", "/sync"}, []prompt{
+		if err := a.runner.PtyRun(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath}, []prompt{
 			{promptSyncContinue, "yes"},
 			{promptSyncErrors, "off"},
 			{promptSelectiveSync, "n"},
@@ -407,16 +615,18 @@ func (a app) applyManagedIgnores() error {
 	}
 
 	for _, pattern := range subtractStrings(previous, desired) {
-		if _, err := a.runChecked(jottaCLI, "ignores", "rem", "--pattern", pattern); err != nil {
-			if strings.Contains(err.Error(), "not found") {
+		out, err := a.runChecked(jottaCLI, "ignores", "rem", "--pattern", pattern)
+		if err != nil {
+			if strings.Contains(out, "not found") {
 				continue
 			}
 			return err
 		}
 	}
 	for _, pattern := range subtractStrings(desired, previous) {
-		if _, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", pattern); err != nil {
-			if strings.Contains(err.Error(), "already") {
+		out, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", pattern)
+		if err != nil {
+			if strings.Contains(out, "already") {
 				continue
 			}
 			return err
@@ -455,6 +665,9 @@ func (a app) applyManagedConfig() error {
 	}
 	sort.Strings(desiredKeys)
 	for _, key := range desiredKeys {
+		if previous[key] == desired[key] {
+			continue
+		}
 		if err := a.setConfigValue(key, desired[key]); err != nil {
 			return err
 		}
@@ -498,7 +711,7 @@ func (a app) desiredConfigSettings() (map[string]string, error) {
 
 func (a app) setConfigValue(key, value string) error {
 	fmt.Fprintf(a.stdout, "Setting config %s=%s.\n", key, value)
-	_, err := a.runChecked(jottaCLI, "config", "set", key, value)
+	_, err := a.runChecked(jottaCLI, "config", key, value)
 	return err
 }
 
@@ -522,7 +735,7 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 			}
 			return errors.New("jotta-cli tail exited unexpectedly")
 		case <-ticker.C:
-			out, err := a.runner.Run(jottaCLI, "status")
+			out, err := a.runner.Status(startupProbeTimeout)
 			if err != nil {
 				fmt.Fprintln(a.stdout, "Jottad exited unexpectedly:")
 				if out != "" {
@@ -537,11 +750,12 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 	}
 }
 
-func (a *app) configureMonitor() {
-	a.monitorInterval = envDurationSecondsFrom(a.getenv, "JOTTA_MONITOR_INTERVAL_SECONDS", a.monitorInterval)
-	if a.monitorInterval <= 0 {
-		a.monitorInterval = defaultMonitorInterval
+func configureMonitor(getenv func(string) string, current time.Duration) time.Duration {
+	d := envDurationSecondsFrom(getenv, "JOTTA_MONITOR_INTERVAL_SECONDS", current)
+	if d <= 0 {
+		return defaultMonitorInterval
 	}
+	return d
 }
 
 func (a app) logout() error {
@@ -566,10 +780,6 @@ func (a app) runChecked(name string, args ...string) (string, error) {
 		return out, nil
 	}
 	return out, formatCommandError(name, args, out, err)
-}
-
-func loginWithToken() error {
-	return loginWithTokenWithRunner(execRunner{}, os.Getenv)
 }
 
 func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) error {
@@ -662,6 +872,9 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 				fmt.Fprint(ptyOutput, result.chunk)
 				hadTerminalQuery := responder.respond(ptmx, result.chunk)
 				accumulated += result.chunk
+				if len(accumulated) > 65536 {
+					accumulated = accumulated[len(accumulated)-32768:]
+				}
 
 				if pendingPrompt == -1 {
 					for i, p := range prompts {
@@ -965,8 +1178,8 @@ func defaultConfigFileContent() string {
 		"# checksumthreads=2",
 		"",
 		"# Concurrency and scheduling",
-		"# maxuploads=6",
-		"# maxdownloads=6",
+		"# maxuploads=12",
+		"# maxdownloads=12",
 		"# scaninterval=1h0m0s",
 		"# webhookstatusinterval=6h0m0s",
 		"# slowmomode=0",
@@ -1026,7 +1239,7 @@ func isCommentLine(line string) bool {
 	return strings.HasPrefix(line, "#")
 }
 
-func loadEnvFile(path string) {
+func loadEnvFile(path string, setenv func(string, string) error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -1046,7 +1259,7 @@ func loadEnvFile(path string) {
 		}
 		key := line[:idx]
 		val := strings.Trim(line[idx+1:], `"'`)
-		_ = os.Setenv(key, val)
+		_ = setenv(key, val)
 	}
 }
 
@@ -1058,6 +1271,10 @@ func forceSymlink(target, link string) error {
 	switch {
 	case err == nil:
 		if info.Mode()&os.ModeSymlink != 0 {
+			current, readErr := os.Readlink(link)
+			if readErr == nil && current == target {
+				return nil
+			}
 			if err := os.Remove(link); err != nil {
 				return fmt.Errorf("remove existing symlink %s: %w", link, err)
 			}

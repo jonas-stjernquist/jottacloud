@@ -23,8 +23,11 @@ jobs:
         id: apt
         run: |
           VERSION=$(curl -fsSL https://repo.jotta.cloud/debian/dists/debian/main/binary-amd64/Packages \
-            | grep -m1 '^Source:' \
-            | sed -n 's/.*(\(.*\)).*/\1/p')
+            | awk '
+                $1 == "Package:" && $2 == "jotta-cli" { in_pkg=1; next }
+                $1 == "Package:" && $2 != "jotta-cli" { in_pkg=0 }
+                in_pkg && $1 == "Version:" { print $2; exit }
+              ')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Found APT version: $VERSION"
 

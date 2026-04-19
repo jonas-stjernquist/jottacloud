@@ -28,8 +28,21 @@ jobs:
       - name: Run tests
         run: go test -v -race -timeout 30s ./...
 
-  build-and-push:
+  image-smoke:
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build smoke image
+        run: docker build -t jottacloud:smoke .
+
+      - name: Verify jotta-cli is runnable
+        run: docker run --rm --entrypoint jotta-cli jottacloud:smoke version
+
+  build-and-push:
+    needs: image-smoke
     runs-on: ubuntu-latest
 
     steps:

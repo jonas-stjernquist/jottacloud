@@ -38,4 +38,7 @@ COPY --from=builder /build/entrypoint /src/entrypoint
 
 EXPOSE 14443
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
+  CMD /src/entrypoint healthcheck
+
 ENTRYPOINT ["/src/entrypoint"]
