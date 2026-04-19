@@ -212,10 +212,6 @@ func (a app) run(ctx context.Context, args []string) error {
 		}
 	}
 
-	if err := configureLocaltime(a.getenv("LOCALTIME")); err != nil {
-		fmt.Fprintf(a.stderr, "warning: %v\n", err)
-	}
-
 	if len(args) == 1 && args[0] == "healthcheck" {
 		if err := preparePersistentPaths(); err != nil {
 			return err
@@ -227,6 +223,10 @@ func (a app) run(ctx context.Context, args []string) error {
 			return errors.New("bash subcommand requires JOTTA_DEV=1")
 		}
 		return runBash()
+	}
+
+	if err := configureLocaltime(a.getenv("LOCALTIME")); err != nil {
+		fmt.Fprintf(a.stderr, "warning: %v\n", err)
 	}
 
 	if err := preparePersistentPaths(); err != nil {
@@ -413,7 +413,6 @@ func (a app) configureSync() error {
 		if err := a.reconfigureSyncRoot(persistedRoot); err != nil {
 			return err
 		}
-		persistedRoot = syncRootMountPath
 	}
 
 	if err := a.ensureSyncConfigured(); err != nil {
@@ -559,16 +558,16 @@ func (w *rotatingFileWriter) rotate() error {
 		if err := os.Remove(w.rotatedPath(w.maxBackups)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove rotated log %s: %w", w.rotatedPath(w.maxBackups), err)
 		}
-	}
-	for i := w.maxBackups - 1; i >= 1; i-- {
-		src := w.rotatedPath(i)
-		dst := w.rotatedPath(i + 1)
-		if err := os.Rename(src, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("rotate %s -> %s: %w", src, dst, err)
+		for i := w.maxBackups - 1; i >= 1; i-- {
+			src := w.rotatedPath(i)
+			dst := w.rotatedPath(i + 1)
+			if err := os.Rename(src, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("rotate %s -> %s: %w", src, dst, err)
+			}
 		}
-	}
-	if err := os.Rename(w.path, w.rotatedPath(1)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("rotate active log %s: %w", w.path, err)
+		if err := os.Rename(w.path, w.rotatedPath(1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("rotate active log %s: %w", w.path, err)
+		}
 	}
 	return w.openTruncated()
 }
@@ -1176,14 +1175,14 @@ func defaultConfigFileContent() string {
 		"# downloadrate=0",
 		"# uploadrate=0",
 		"# checksumreadrate=52m",
-			"# checksumthreads=2",
-			"",
-			"# Concurrency and scheduling",
-			"# maxuploads=12",
-			"# maxdownloads=12",
-			"# scaninterval=1h0m0s",
-			"# webhookstatusinterval=6h0m0s",
-			"# slowmomode=0",
+		"# checksumthreads=2",
+		"",
+		"# Concurrency and scheduling",
+		"# maxuploads=12",
+		"# maxdownloads=12",
+		"# scaninterval=1h0m0s",
+		"# webhookstatusinterval=6h0m0s",
+		"# slowmomode=0",
 		"",
 		"# Filtering and logging",
 		"# ignorehiddenfiles=false",
