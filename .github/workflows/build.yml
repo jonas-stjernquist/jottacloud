@@ -14,7 +14,28 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          # Build golangci-lint from source with the Go toolchain from
+          # setup-go so we are not blocked by a prebuilt binary being
+          # compiled against an older Go than go.mod requires.
+          install-mode: goinstall
+
   test:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

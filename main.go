@@ -21,41 +21,57 @@ import (
 )
 
 const (
-	secretTokenPath        = "/run/secrets/jotta_token"
-	localtimeRoot          = "/usr/share/zoneinfo"
-	startupProbeTimeout    = time.Second
-	syncStatusTimeout      = 5 * time.Second
-	healthcheckTimeout     = 5 * time.Second
-	loginTimeout           = 20 * time.Second
-	logoutTimeout          = 20 * time.Second
-	devicePromptTimeout    = 10 * time.Second
-	syncSetupTimeout       = 30 * time.Second
+	secretTokenPath = "/run/secrets/jotta_token"
+	localtimeRoot   = "/usr/share/zoneinfo"
+
+	// Short probe used for liveness checks where jottad either answers
+	// quickly or is assumed not ready yet. The waitForStartup loop runs
+	// one probe per second, so this must stay well under 1s.
+	startupProbeTimeout = time.Second
+	// sync and healthcheck probes can legitimately take longer than a
+	// liveness ping because they walk local state.
+	syncStatusTimeout  = 5 * time.Second
+	healthcheckTimeout = 5 * time.Second
+	// Interactive CLI prompts. Login talks to Jottacloud's auth service,
+	// so it tolerates a fuller network round-trip; device/logout are local.
+	loginTimeout        = 20 * time.Second
+	logoutTimeout       = 20 * time.Second
+	devicePromptTimeout = 10 * time.Second
+	syncSetupTimeout    = 30 * time.Second
+	// Monitor cadence after startup; exposed via JOTTA_MONITOR_INTERVAL_SECONDS.
 	defaultMonitorInterval = 15 * time.Second
-	setupSettlingDelay     = 3 * time.Second
-	shutdownGracePeriod    = 5 * time.Second
-	terminalSettleDelay    = 50 * time.Millisecond
-	readPollInterval       = 10 * time.Millisecond
-	promptLicense          = "accept license (yes/no): "
-	promptToken            = "Personal login token: "
-	promptDeviceName       = "Device name"
-	promptReuseDevice      = "Do you want to re-use this device? (yes/no):"
-	promptLogout           = "Backup will stop. Continue?(y/n): "
-	promptSyncContinue     = "Continue sync setup? [yes]:"
-	promptSyncErrors       = "Chose the error reporting mode for sync:"
-	promptSelectiveSync    = "Do you want to setup selective sync? (y/n):"
-	statusMatchingDevice   = "Found remote device that matches this machine"
-	statusSessionRevoked   = "Error: The session has been revoked."
-	statusNoDeviceName     = "The device name has not been set"
-	statusNotLoggedIn      = "Not logged in"
-	statusDeviceMissing    = "does not exist remotely"
-	statusSyncDisabled     = "Sync is not enabled"
-	queryDSR               = "\x1b[6n"
-	queryOSC11             = "\x1b]11;?\x1b\\"
-	replyDSR               = "\x1b[1;1R"
-	replyOSC11             = "\x1b]11;rgb:0000/0000/0000\x1b\\"
-	containerLogName       = "container.log"
-	containerLogMaxBytes   = 10 * 1024 * 1024
-	containerLogBackups    = 4
+	// Grace period after adding backup directories to let jottad index
+	// them before we start issuing further CLI calls.
+	setupSettlingDelay = 3 * time.Second
+	// Maximum time we give jottad/tail to exit after SIGTERM before SIGKILL.
+	shutdownGracePeriod = 5 * time.Second
+	// Window after a prompt match in which we still expect terminal queries
+	// (DSR / OSC 11) to arrive; if another query shows up during the window
+	// we re-arm. Must exceed typical terminal query latency (~10–30ms).
+	terminalSettleDelay = 50 * time.Millisecond
+	// How often the ptyRun loop checks whether a pending prompt has settled.
+	readPollInterval     = 10 * time.Millisecond
+	promptLicense        = "accept license (yes/no): "
+	promptToken          = "Personal login token: "
+	promptDeviceName     = "Device name"
+	promptReuseDevice    = "Do you want to re-use this device? (yes/no):"
+	promptLogout         = "Backup will stop. Continue?(y/n): "
+	promptSyncContinue   = "Continue sync setup? [yes]:"
+	promptSyncErrors     = "Chose the error reporting mode for sync:"
+	promptSelectiveSync  = "Do you want to setup selective sync? (y/n):"
+	statusMatchingDevice = "Found remote device that matches this machine"
+	statusSessionRevoked = "Error: The session has been revoked."
+	statusNoDeviceName   = "The device name has not been set"
+	statusNotLoggedIn    = "Not logged in"
+	statusDeviceMissing  = "does not exist remotely"
+	statusSyncDisabled   = "Sync is not enabled"
+	queryDSR             = "\x1b[6n"
+	queryOSC11           = "\x1b]11;?\x1b\\"
+	replyDSR             = "\x1b[1;1R"
+	replyOSC11           = "\x1b]11;rgb:0000/0000/0000\x1b\\"
+	containerLogName     = "container.log"
+	containerLogMaxBytes = 10 * 1024 * 1024
+	containerLogBackups  = 4
 )
 
 var (
@@ -72,6 +88,7 @@ var (
 	syncRootMountPath     = "/sync"
 
 	errPtyTimeout    = errors.New("pty timeout")
+	errPtyWrite      = errors.New("pty write failed")
 	errStatusTimeout = errors.New("status timeout")
 
 	// managedIgnoreStatePath and managedConfigStatePath are vars so tests can
@@ -134,7 +151,7 @@ type process interface {
 type commandRunner interface {
 	Run(name string, args ...string) (string, error)
 	Start(name string, args []string, stdout, stderr io.Writer) (process, error)
-	PtyRun(name string, args []string, prompts []prompt, timeout time.Duration) error
+	PtyRun(ctx context.Context, name string, args []string, prompts []prompt, timeout time.Duration) error
 	Status(timeout time.Duration) (string, error)
 }
 
@@ -203,12 +220,14 @@ func main() {
 }
 
 func (a app) run(ctx context.Context, args []string) error {
-	loadEnvFile(filepath.Join(dataDir, "jottad.env"), a.setenv)
+	loadEnvFile(filepath.Join(dataDir, "jottad.env"), a.setenv, a.stderr)
 	a.monitorInterval = configureMonitor(a.getenv, a.monitorInterval)
 
 	if token, err := os.ReadFile(secretTokenPath); err == nil {
 		if trimmed := strings.TrimSpace(string(token)); trimmed != "" && a.setenv != nil {
-			_ = a.setenv("JOTTA_TOKEN", trimmed)
+			if setErr := a.setenv("JOTTA_TOKEN", trimmed); setErr != nil {
+				fmt.Fprintf(a.stderr, "warning: set JOTTA_TOKEN from %s: %v\n", secretTokenPath, setErr)
+			}
 		}
 	}
 
@@ -250,7 +269,7 @@ func (a app) run(ctx context.Context, args []string) error {
 	if err := a.configureBackups(); err != nil {
 		return err
 	}
-	if err := a.configureSync(); err != nil {
+	if err := a.configureSync(ctx); err != nil {
 		return err
 	}
 	if err := a.applyManagedIgnores(); err != nil {
@@ -292,7 +311,7 @@ func (a app) waitForStartup(ctx context.Context) error {
 		if status != statusUnknown {
 			fmt.Fprintln(a.stdout, "Could not start jottad. Checking why.")
 		}
-		if err := a.handleStartupStatus(status); err != nil {
+		if err := a.handleStartupStatus(ctx, status); err != nil {
 			return err
 		}
 
@@ -314,37 +333,37 @@ func (a app) waitForStartup(ctx context.Context) error {
 	return errors.New("startup timeout")
 }
 
-func (a app) handleStartupStatus(kind statusKind) error {
+func (a app) handleStartupStatus(ctx context.Context, kind statusKind) error {
 	switch kind {
 	case statusMatchingDeviceKind:
 		fmt.Fprintln(a.stdout, "Found matching device name, re-using.")
-		return a.runner.PtyRun(jottaCLI, []string{"status"}, []prompt{
+		return a.runner.PtyRun(ctx, jottaCLI, []string{"status"}, []prompt{
 			{promptReuseDevice, "yes"},
 		}, startupProbeTimeout)
 	case statusSessionRevokedKind:
 		fmt.Fprintln(a.stdout, "Session expired. Logging out and back in.")
-		if err := a.logout(); err != nil {
+		if err := a.logout(ctx); err != nil {
 			return err
 		}
-		return a.loginWithToken()
+		return a.loginWithToken(ctx)
 	case statusNoDeviceNameKind:
 		device := a.getenv("JOTTA_DEVICE")
 		if device == "" {
 			return errors.New("JOTTA_DEVICE is not set")
 		}
 		fmt.Fprintln(a.stdout, "Device name not set, configuring.")
-		return a.runner.PtyRun(jottaCLI, []string{"status"}, []prompt{
+		return a.runner.PtyRun(ctx, jottaCLI, []string{"status"}, []prompt{
 			{promptDeviceName, device},
 		}, devicePromptTimeout)
 	case statusNotLoggedInKind:
 		fmt.Fprintln(a.stdout, "First time login.")
-		return a.loginWithToken()
+		return a.loginWithToken(ctx)
 	case statusDeviceMissingKind:
 		fmt.Fprintln(a.stdout, "Device not found remotely. Logging out and back in.")
-		if err := a.logout(); err != nil {
+		if err := a.logout(ctx); err != nil {
 			return err
 		}
-		return a.loginWithToken()
+		return a.loginWithToken(ctx)
 	default:
 		return nil
 	}
@@ -389,7 +408,7 @@ func (a app) configureBackupsIn(globPattern string) error {
 	return nil
 }
 
-func (a app) configureSync() error {
+func (a app) configureSync(ctx context.Context) error {
 	persistedRoot, err := readPersistedSyncRoot()
 	if err != nil {
 		return err
@@ -415,7 +434,7 @@ func (a app) configureSync() error {
 		}
 	}
 
-	if err := a.ensureSyncConfigured(); err != nil {
+	if err := a.ensureSyncConfigured(ctx); err != nil {
 		return err
 	}
 
@@ -586,10 +605,10 @@ func (w *rotatingFileWriter) rotatedPath(index int) string {
 	return fmt.Sprintf("%s.%d", w.path, index)
 }
 
-func (a app) ensureSyncConfigured() error {
+func (a app) ensureSyncConfigured(ctx context.Context) error {
 	out, err := a.runner.Status(syncStatusTimeout)
 	if strings.Contains(out, statusSyncDisabled) {
-		if err := a.runner.PtyRun(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath}, []prompt{
+		if err := a.runner.PtyRun(ctx, jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath}, []prompt{
 			{promptSyncContinue, "yes"},
 			{promptSyncErrors, "off"},
 			{promptSelectiveSync, "n"},
@@ -758,8 +777,8 @@ func configureMonitor(getenv func(string) string, current time.Duration) time.Du
 	return d
 }
 
-func (a app) logout() error {
-	if err := a.runner.PtyRun(jottaCLI, []string{"logout"}, []prompt{
+func (a app) logout(ctx context.Context) error {
+	if err := a.runner.PtyRun(ctx, jottaCLI, []string{"logout"}, []prompt{
 		{promptLogout, "y"},
 	}, logoutTimeout); err != nil {
 		return fmt.Errorf("logout: %w", err)
@@ -767,8 +786,8 @@ func (a app) logout() error {
 	return nil
 }
 
-func (a app) loginWithToken() error {
-	if err := loginWithTokenWithRunner(a.runner, a.getenv); err != nil {
+func (a app) loginWithToken(ctx context.Context) error {
+	if err := loginWithTokenWithRunner(ctx, a.runner, a.getenv); err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 	return nil
@@ -782,7 +801,7 @@ func (a app) runChecked(name string, args ...string) (string, error) {
 	return out, formatCommandError(name, args, out, err)
 }
 
-func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) error {
+func loginWithTokenWithRunner(ctx context.Context, runner commandRunner, getenv func(string) string) error {
 	token := getenv("JOTTA_TOKEN")
 	if token == "" {
 		return errors.New("JOTTA_TOKEN is not set")
@@ -791,7 +810,7 @@ func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) 
 	if device == "" {
 		return errors.New("JOTTA_DEVICE is not set")
 	}
-	return runner.PtyRun(jottaCLI, []string{"login"}, []prompt{
+	return runner.PtyRun(ctx, jottaCLI, []string{"login"}, []prompt{
 		{promptLicense, "yes"},
 		{promptToken, token},
 		{promptDeviceName, device},
@@ -799,7 +818,7 @@ func loginWithTokenWithRunner(runner commandRunner, getenv func(string) string) 
 	}, loginTimeout)
 }
 
-func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration) error {
+func ptyRun(ctx context.Context, name string, args []string, prompts []prompt, timeout time.Duration) error {
 	cmd := exec.Command(name, args...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -854,25 +873,40 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 	ticker := time.NewTicker(readPollInterval)
 	defer ticker.Stop()
 
-	sendPrompt := func(index int) {
-		_, _ = ptmx.Write([]byte(prompts[index].response + "\r"))
+	sendPrompt := func(index int) error {
+		if _, err := ptmx.Write([]byte(prompts[index].response + "\r")); err != nil {
+			return fmt.Errorf("%s: %w: %v", name, errPtyWrite, err)
+		}
 		responded[index] = true
 		accumulated = ""
 		pendingPrompt = -1
 		pendingPromptReadyAt = time.Time{}
+		return nil
 	}
 
 	for {
 		select {
+		case <-ctx.Done():
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return fmt.Errorf("%s: %w", name, ctx.Err())
 		case result, ok := <-readCh:
 			if !ok {
 				return cmd.Wait()
 			}
 			if result.chunk != "" {
 				fmt.Fprint(ptyOutput, result.chunk)
-				hadTerminalQuery := responder.respond(ptmx, result.chunk)
+				hadTerminalQuery, respErr := responder.respond(ptmx, result.chunk)
+				if respErr != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					return respErr
+				}
 				accumulated += result.chunk
 				if len(accumulated) > 65536 {
+					// Keep only a trailing window; prompt.match strings are
+					// short (<100 bytes in practice) so they will not straddle
+					// the cut.
 					accumulated = accumulated[len(accumulated)-32768:]
 				}
 
@@ -894,7 +928,11 @@ func ptyRun(name string, args []string, prompts []prompt, timeout time.Duration)
 			}
 		case <-ticker.C:
 			if pendingPrompt != -1 && time.Now().After(pendingPromptReadyAt) {
-				sendPrompt(pendingPrompt)
+				if err := sendPrompt(pendingPrompt); err != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					return err
+				}
 			}
 		case <-deadlineTimer.C:
 			_ = cmd.Process.Kill()
@@ -923,8 +961,8 @@ func (execRunner) Start(name string, args []string, stdout, stderr io.Writer) (p
 	return execProcess{cmd: cmd}, nil
 }
 
-func (execRunner) PtyRun(name string, args []string, prompts []prompt, timeout time.Duration) error {
-	return ptyRun(name, args, prompts, timeout)
+func (execRunner) PtyRun(ctx context.Context, name string, args []string, prompts []prompt, timeout time.Duration) error {
+	return ptyRun(ctx, name, args, prompts, timeout)
 }
 
 func (execRunner) Status(timeout time.Duration) (string, error) {
@@ -947,7 +985,9 @@ func (execRunner) Status(timeout time.Duration) (string, error) {
 			if n > 0 {
 				chunk := string(buf[:n])
 				out.WriteString(chunk)
-				responder.respond(ptmx, chunk)
+				// Reply errors here are non-fatal for a one-shot status
+				// probe: the subsequent Read will surface any PTY trouble.
+				_, _ = responder.respond(ptmx, chunk)
 			}
 			if readErr != nil {
 				return
@@ -985,7 +1025,7 @@ func (p execProcess) Kill() error {
 	return p.cmd.Process.Kill()
 }
 
-func (r *terminalResponder) respond(ptmx *os.File, chunk string) bool {
+func (r *terminalResponder) respond(ptmx *os.File, chunk string) (bool, error) {
 	r.pending += chunk
 	answered := false
 	queries := r.queries
@@ -997,7 +1037,9 @@ func (r *terminalResponder) respond(ptmx *os.File, chunk string) bool {
 		matched := false
 		for _, query := range queries {
 			if idx := strings.Index(r.pending, query.seq); idx >= 0 {
-				_, _ = ptmx.Write([]byte(query.reply))
+				if _, err := ptmx.Write([]byte(query.reply)); err != nil {
+					return answered, fmt.Errorf("terminal query reply: %w: %v", errPtyWrite, err)
+				}
 				r.pending = r.pending[:idx] + r.pending[idx+len(query.seq):]
 				answered = true
 				matched = true
@@ -1010,7 +1052,7 @@ func (r *terminalResponder) respond(ptmx *os.File, chunk string) bool {
 	}
 
 	r.pending = terminalQuerySuffix(r.pending, queries)
-	return answered
+	return answered, nil
 }
 
 type terminalQuery struct {
@@ -1239,9 +1281,12 @@ func isCommentLine(line string) bool {
 	return strings.HasPrefix(line, "#")
 }
 
-func loadEnvFile(path string, setenv func(string, string) error) {
+func loadEnvFile(path string, setenv func(string, string) error, stderr io.Writer) {
 	f, err := os.Open(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) && stderr != nil {
+			fmt.Fprintf(stderr, "warning: open %s: %v\n", path, err)
+		}
 		return
 	}
 	defer f.Close()
@@ -1259,7 +1304,12 @@ func loadEnvFile(path string, setenv func(string, string) error) {
 		}
 		key := line[:idx]
 		val := strings.Trim(line[idx+1:], `"'`)
-		_ = setenv(key, val)
+		if err := setenv(key, val); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "warning: set %s from %s: %v\n", key, path, err)
+		}
+	}
+	if err := scanner.Err(); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "warning: read %s: %v\n", path, err)
 	}
 }
 
