@@ -1,4 +1,7 @@
-FROM golang:trixie AS builder
+# Pin Go toolchain to match go.mod (see go 1.26.2 directive). Bump the tag
+# and go.mod together; Dependabot covers the go module graph but not this
+# FROM line, so the version lives here explicitly.
+FROM golang:1.26.2-trixie AS builder
 
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -6,6 +9,9 @@ RUN go mod download
 COPY main.go ./
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o entrypoint .
 
+# Runtime base: pinned to the trixie-slim point release currently supported
+# by repo.jotta.cloud's apt repo. The weekly scheduled rebuild in
+# .github/workflows/build.yml picks up OS patches.
 FROM debian:trixie-slim
 
 LABEL maintainer="jonas-stjernquist" \

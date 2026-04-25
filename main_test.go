@@ -87,7 +87,7 @@ func TestPtyRun_SinglePrompt(t *testing.T) {
 		FinalOutput: "Hello alice\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{"Enter name: ", "alice"},
 	}, 5*time.Second)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestPtyRun_MultiplePrompts(t *testing.T) {
 		},
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{"First: ", "one"},
 		{"Second: ", "two"},
 		{"Third: ", "three"},
@@ -125,7 +125,7 @@ func TestPtyRun_MutuallyExclusivePrompts(t *testing.T) {
 		FinalOutput: "Logged in.\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{promptLicense, "yes"},
 		{promptToken, "test-token"},
 		// Both alternatives listed — only "Device name" will appear.
@@ -148,7 +148,7 @@ func TestPtyRun_MutuallyExclusivePrompts_ReuseDevice(t *testing.T) {
 		FinalOutput: "Logged in.\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{promptLicense, "yes"},
 		{promptToken, "test-token"},
 		{promptDeviceName, "my-device"},
@@ -165,7 +165,7 @@ func TestPtyRun_Timeout(t *testing.T) {
 	})
 
 	start := time.Now()
-	err := ptyRun(fakeCLIPath, nil, nil, 500*time.Millisecond)
+	err := ptyRun(context.Background(), fakeCLIPath, nil, nil, 500*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -179,13 +179,41 @@ func TestPtyRun_Timeout(t *testing.T) {
 	}
 }
 
+func TestPtyRun_ContextCancellation(t *testing.T) {
+	// Verify that cancelling the parent context interrupts a hung ptyRun
+	// well before the hard deadline fires. Acceptance criterion for M4.
+	setScenarioEnv(t, fakeScenario{
+		HangForever: true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := ptyRun(ctx, fakeCLIPath, nil, nil, 10*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from context cancellation, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("ptyRun did not honor context cancellation promptly: %v", elapsed)
+	}
+}
+
 func TestPtyRun_NoMatchingPrompt(t *testing.T) {
 	// fake-cli prints output and exits without any interactive prompts.
 	setScenarioEnv(t, fakeScenario{
 		FinalOutput: "Some status output\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{"this will never match: ", "unused"},
 	}, 2*time.Second)
 	// Process exits cleanly — no error expected.
@@ -202,7 +230,7 @@ func TestPtyRun_PartialPromptAcrossReads(t *testing.T) {
 		},
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{"Enter your name please: ", "bob"},
 	}, 5*time.Second)
 	if err != nil {
@@ -216,7 +244,7 @@ func TestPtyRun_ExitCodePropagated(t *testing.T) {
 		ExitCode:    2,
 	})
 
-	err := ptyRun(fakeCLIPath, nil, nil, 2*time.Second)
+	err := ptyRun(context.Background(), fakeCLIPath, nil, nil, 2*time.Second)
 	if err == nil {
 		t.Fatal("expected error from non-zero exit code")
 	}
@@ -238,7 +266,7 @@ func TestPtyRun_CarriageReturnAsEnter(t *testing.T) {
 		FinalOutput: "Logged in.\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{promptLicense, "yes"},
 		{promptToken, "tok"},
 	}, 5*time.Second)
@@ -262,7 +290,7 @@ func TestPtyRun_DefersPromptResponseAfterTerminalQueries(t *testing.T) {
 		FinalOutput: "Logged in.\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{promptLicense, "yes"},
 	}, 5*time.Second)
 	if err != nil {
@@ -286,7 +314,7 @@ func TestPtyRun_WaitsForQuietReadBeforePromptResponse(t *testing.T) {
 		FinalOutput: "Logged in.\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{promptLicense, "yes"},
 	}, 5*time.Second)
 	if err != nil {
@@ -308,7 +336,7 @@ func TestPtyRun_LogoutSuppressesOSC11Reply(t *testing.T) {
 		FinalOutput: "Logged out.\n",
 	})
 
-	err := ptyRun(fakeCLIPath, nil, []prompt{
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
 		{promptLogout, "y"},
 	}, 5*time.Second)
 	if err != nil {
@@ -335,7 +363,7 @@ func TestLoginWithToken_NewDevice(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
+	err := loginWithTokenWithRunner(context.Background(), execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +386,7 @@ func TestLoginWithToken_ExistingDevice(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
+	err := loginWithTokenWithRunner(context.Background(), execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +414,7 @@ func TestLoginWithToken_PromptStringsMatch(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
+	err := loginWithTokenWithRunner(context.Background(), execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatalf("loginWithToken failed — prompt strings may have changed: %v", err)
 	}
@@ -416,7 +444,7 @@ func TestLoginWithToken_DefersLicenseResponseAfterTerminalQueries(t *testing.T) 
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
+	err := loginWithTokenWithRunner(context.Background(), execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +475,7 @@ func TestLoginWithToken_WaitsForQuietReadBeforeLicenseResponse(t *testing.T) {
 	jottaCLI = fakeCLIPath
 	defer func() { jottaCLI = origCLI }()
 
-	err := loginWithTokenWithRunner(execRunner{}, os.Getenv)
+	err := loginWithTokenWithRunner(context.Background(), execRunner{}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,39 +535,62 @@ func TestStatusPatternMatching(t *testing.T) {
 
 func TestLoadEnvFile_BasicKeyValue(t *testing.T) {
 	f := writeTempFile(t, "KEY1=value1\nKEY2=value2\n")
-	loadEnvFile(f, os.Setenv)
+	loadEnvFile(f, os.Setenv, io.Discard)
 	assertEnv(t, "KEY1", "value1")
 	assertEnv(t, "KEY2", "value2")
 }
 
 func TestLoadEnvFile_QuotedValues(t *testing.T) {
 	f := writeTempFile(t, `DOUBLE="hello world"`+"\n"+`SINGLE='foo bar'`+"\n")
-	loadEnvFile(f, os.Setenv)
+	loadEnvFile(f, os.Setenv, io.Discard)
 	assertEnv(t, "DOUBLE", "hello world")
 	assertEnv(t, "SINGLE", "foo bar")
 }
 
 func TestLoadEnvFile_ExportPrefix(t *testing.T) {
 	f := writeTempFile(t, "export MY_VAR=exported\n")
-	loadEnvFile(f, os.Setenv)
+	loadEnvFile(f, os.Setenv, io.Discard)
 	assertEnv(t, "MY_VAR", "exported")
 }
 
 func TestLoadEnvFile_CommentsAndBlanks(t *testing.T) {
 	f := writeTempFile(t, "# comment\n\nVALID=yes\n  # indented comment\n")
-	loadEnvFile(f, os.Setenv)
+	loadEnvFile(f, os.Setenv, io.Discard)
 	assertEnv(t, "VALID", "yes")
 }
 
 func TestLoadEnvFile_NoEquals(t *testing.T) {
 	f := writeTempFile(t, "NOEQUALS\n=noleft\nGOOD=ok\n")
-	loadEnvFile(f, os.Setenv)
+	loadEnvFile(f, os.Setenv, io.Discard)
 	assertEnv(t, "GOOD", "ok")
 }
 
 func TestLoadEnvFile_MissingFile(t *testing.T) {
 	// Should not panic or error — silently ignored.
-	loadEnvFile("/nonexistent/path/env", os.Setenv)
+	loadEnvFile("/nonexistent/path/env", os.Setenv, io.Discard)
+}
+
+func TestLoadEnvFile_WarnsOnScannerError(t *testing.T) {
+	// A single line longer than bufio.MaxScanTokenSize (64 KiB) causes
+	// scanner.Err() to return bufio.ErrTooLong. Verify the warning reaches
+	// stderr instead of being silently dropped.
+	longValue := strings.Repeat("A", 70000)
+	f := writeTempFile(t, "LONG="+longValue+"\n")
+	var buf bytes.Buffer
+	loadEnvFile(f, func(string, string) error { return nil }, &buf)
+	if !strings.Contains(buf.String(), "warning:") {
+		t.Fatalf("expected scanner-error warning on stderr, got %q", buf.String())
+	}
+}
+
+func TestLoadEnvFile_WarnsOnSetenvError(t *testing.T) {
+	f := writeTempFile(t, "OK=value\n")
+	var buf bytes.Buffer
+	setErr := errors.New("mock setenv failure")
+	loadEnvFile(f, func(string, string) error { return setErr }, &buf)
+	if !strings.Contains(buf.String(), "mock setenv failure") {
+		t.Fatalf("expected setenv error on stderr, got %q", buf.String())
+	}
 }
 
 // --- envInt tests ---
@@ -736,7 +787,7 @@ func TestConfigureLocaltime_MissingZone(t *testing.T) {
 
 func TestLoginWithTokenWithRunner_MissingToken(t *testing.T) {
 	runner := &fakeRunner{}
-	err := loginWithTokenWithRunner(runner, envMap("JOTTA_DEVICE", "dev"))
+	err := loginWithTokenWithRunner(context.Background(), runner, envMap("JOTTA_DEVICE", "dev"))
 	if err == nil || !strings.Contains(err.Error(), "JOTTA_TOKEN") {
 		t.Fatalf("expected missing JOTTA_TOKEN error, got %v", err)
 	}
@@ -744,7 +795,7 @@ func TestLoginWithTokenWithRunner_MissingToken(t *testing.T) {
 
 func TestLoginWithTokenWithRunner_MissingDevice(t *testing.T) {
 	runner := &fakeRunner{}
-	err := loginWithTokenWithRunner(runner, envMap("JOTTA_TOKEN", "tok"))
+	err := loginWithTokenWithRunner(context.Background(), runner, envMap("JOTTA_TOKEN", "tok"))
 	if err == nil || !strings.Contains(err.Error(), "JOTTA_DEVICE") {
 		t.Fatalf("expected missing JOTTA_DEVICE error, got %v", err)
 	}
@@ -891,13 +942,25 @@ func TestTerminalResponder_SplitQueriesAcrossReads(t *testing.T) {
 	defer writer.Close()
 
 	var responder terminalResponder
-	if got := responder.respond(writer, "\x1b]11;"); got {
+	got, err := responder.respond(writer, "\x1b]11;")
+	if err != nil {
+		t.Fatalf("respond returned error: %v", err)
+	}
+	if got {
 		t.Fatal("unexpected reply for incomplete OSC11 query")
 	}
-	if got := responder.respond(writer, "?\x1b\\hello\x1b["); !got {
+	got, err = responder.respond(writer, "?\x1b\\hello\x1b[")
+	if err != nil {
+		t.Fatalf("respond returned error: %v", err)
+	}
+	if !got {
 		t.Fatal("expected OSC11 reply after completed split query")
 	}
-	if got := responder.respond(writer, "6n"); !got {
+	got, err = responder.respond(writer, "6n")
+	if err != nil {
+		t.Fatalf("respond returned error: %v", err)
+	}
+	if !got {
 		t.Fatal("expected DSR reply after completed split query")
 	}
 
@@ -1009,7 +1072,7 @@ func TestEnsureSyncConfigured_ContinuesOnStatusProbeError(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.ensureSyncConfigured(); err != nil {
+	if err := a.ensureSyncConfigured(context.Background()); err != nil {
 		t.Fatalf("ensureSyncConfigured error = %v, want nil", err)
 	}
 	if runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
@@ -1035,7 +1098,7 @@ func TestEnsureSyncConfigured_SetsUpWhenSyncDisabled(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.ensureSyncConfigured(); err != nil {
+	if err := a.ensureSyncConfigured(context.Background()); err != nil {
 		t.Fatalf("ensureSyncConfigured error = %v, want nil", err)
 	}
 	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
@@ -1156,6 +1219,116 @@ func TestDesiredIgnorePatterns_MergesFileAndEnvPatterns(t *testing.T) {
 	if containsString(patterns, defaultIgnorePatterns[0]) {
 		t.Fatalf("desiredIgnorePatterns unexpectedly injected built-in default %q", defaultIgnorePatterns[0])
 	}
+}
+
+func setupIgnoreTest(t *testing.T, ignoreFileContent string, stateContent string) *fakeRunner {
+	t.Helper()
+	withManagedPaths(t)
+
+	oldState := managedIgnoreStatePath
+	managedIgnoreStatePath = filepath.Join(filepath.Dir(configFilePath), "managed-ignores.state")
+	t.Cleanup(func() { managedIgnoreStatePath = oldState })
+
+	if err := os.MkdirAll(filepath.Dir(ignoreFilePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoreFilePath, []byte(ignoreFileContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if stateContent != "" {
+		if err := os.WriteFile(managedIgnoreStatePath, []byte(stateContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &fakeRunner{}
+}
+
+func TestApplyManagedIgnores_AddsNewPatterns(t *testing.T) {
+	runner := setupIgnoreTest(t, "a/new\nb/new\n", "")
+	a := app{
+		runner: runner,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getenv: func(string) string { return "" },
+	}
+
+	if err := a.applyManagedIgnores(); err != nil {
+		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "a/new"})) {
+		t.Errorf("expected ignores add for a/new, got calls: %v", runner.calls)
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "b/new"})) {
+		t.Errorf("expected ignores add for b/new, got calls: %v", runner.calls)
+	}
+
+	persisted, err := readStateLines(managedIgnoreStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a/new", "b/new"}
+	if !stringSlicesEqual(persisted, want) {
+		t.Fatalf("persisted state = %v, want %v", persisted, want)
+	}
+}
+
+func TestApplyManagedIgnores_RemovesStalePatterns(t *testing.T) {
+	runner := setupIgnoreTest(t, "keep/me\n", "drop/me\nkeep/me\n")
+	a := app{
+		runner: runner,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getenv: func(string) string { return "" },
+	}
+
+	if err := a.applyManagedIgnores(); err != nil {
+		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
+	}
+	if !runner.called("run " + cmdKey(jottaCLI, []string{"ignores", "rem", "--pattern", "drop/me"})) {
+		t.Errorf("expected ignores rem for drop/me, got calls: %v", runner.calls)
+	}
+	if runner.called("run " + cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "keep/me"})) {
+		t.Errorf("unexpected re-add of already-tracked pattern keep/me")
+	}
+
+	persisted, err := readStateLines(managedIgnoreStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stringSlicesEqual(persisted, []string{"keep/me"}) {
+		t.Fatalf("persisted state = %v, want [keep/me]", persisted)
+	}
+}
+
+func TestApplyManagedIgnores_NoOpWhenStateMatches(t *testing.T) {
+	runner := setupIgnoreTest(t, "a/x\nb/y\n", "a/x\nb/y\n")
+	a := app{
+		runner: runner,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getenv: func(string) string { return "" },
+	}
+
+	if err := a.applyManagedIgnores(); err != nil {
+		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "ignores add") || strings.Contains(call, "ignores rem") {
+			t.Fatalf("expected no ignores mutations when state matches, got %q", call)
+		}
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDesiredConfigSettings_MergesFileAndEnvOverrides(t *testing.T) {
@@ -1284,7 +1457,7 @@ func TestConfigureSync_EmptyMountedDirectoryTriggersSetup(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.configureSync(); err != nil {
+	if err := a.configureSync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
@@ -1307,7 +1480,7 @@ func TestConfigureSync_MissingMountSkipsWithoutState(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.configureSync(); err != nil {
+	if err := a.configureSync(context.Background()); err != nil {
 		t.Fatalf("configureSync error = %v, want nil", err)
 	}
 }
@@ -1330,7 +1503,7 @@ func TestConfigureSync_MissingMountFailsWhenStateExists(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	err := a.configureSync()
+	err := a.configureSync(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "not mounted") {
 		t.Fatalf("configureSync error = %v, want missing mount error", err)
 	}
@@ -1363,7 +1536,7 @@ func TestConfigureSync_ReconfiguresMismatchedRoot(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.configureSync(); err != nil {
+	if err := a.configureSync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"sync", "reset"})) {
@@ -1403,7 +1576,7 @@ func TestConfigureSync_ExistingCanonicalRootStartsWithoutSetup(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.configureSync(); err != nil {
+	if err := a.configureSync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if runner.called("pty " + cmdKey(jottaCLI, []string{"sync", "setup", "--root", syncRootMountPath})) {
@@ -1602,15 +1775,27 @@ func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		cancel()
-	}()
 
 	done := make(chan error)
 	close(done)
-	if err := a.monitor(ctx, asyncProcess{done: done}); err != nil {
-		t.Fatalf("monitor error = %v, want nil", err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- a.monitor(ctx, asyncProcess{done: done})
+	}()
+
+	// Monitor's select may pick either the closed tail-done channel (which
+	// sets tailDone=nil and loops) or ctx.Done() first; both paths return
+	// nil. The timeout below is a safety net, not a synchronization point.
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("monitor error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitor did not return after context cancellation")
 	}
 }
 
@@ -1642,7 +1827,7 @@ func (r *fakeRunner) Start(name string, args []string, stdout, stderr io.Writer)
 	return &fakeProcess{}, nil
 }
 
-func (r *fakeRunner) PtyRun(name string, args []string, prompts []prompt, timeout time.Duration) error {
+func (r *fakeRunner) PtyRun(ctx context.Context, name string, args []string, prompts []prompt, timeout time.Duration) error {
 	key := cmdKey(name, args)
 	r.calls = append(r.calls, "pty "+key)
 	if err, ok := r.ptyErrors[key]; ok {

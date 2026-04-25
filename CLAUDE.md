@@ -8,7 +8,7 @@ Docker container wrapping the Jottacloud CLI backup client. Single Go entrypoint
 docker build -t jottacloud:local .
 ```
 
-Go binary is compiled in-container (`golang:trixie` builder stage, Go 1.26.1+) with `CGO_ENABLED=0` for a static binary.
+Go binary is compiled in-container (`golang:trixie` builder stage, Go 1.26.2+) with `CGO_ENABLED=0` for a static binary.
 
 ## Run
 
