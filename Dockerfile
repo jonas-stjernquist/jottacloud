@@ -23,7 +23,8 @@ VOLUME ["/data"]
 ENV JOTTA_TOKEN="**None**" \
     JOTTA_DEVICE="**docker-jottacloud**" \
     LOCALTIME="Europe/Stockholm" \
-    STARTUP_TIMEOUT=30 \
+    STARTUP_TIMEOUT=60 \
+    BOOTSTRAP_TIMEOUT=60 \
     JOTTAD_SYSTEMD=0
 
 RUN apt-get update && \

@@ -209,7 +209,8 @@ The entrypoint keeps sync setup intentionally simple:
 | `JOTTA_IGNORE_PATTERNS` | `""` | Extra ignore patterns as comma- or newline-separated values. Added on top of `ignorefile`. |
 | `JOTTA_MONITOR_INTERVAL_SECONDS` | `15` | Seconds between background `jotta-cli status` health probes. |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
-| `STARTUP_TIMEOUT` | `30` | Seconds to wait for `jottad` startup before failing. |
+| `STARTUP_TIMEOUT` | `60` | Seconds to wait for `jottad` startup before failing. |
+| `BOOTSTRAP_TIMEOUT` | `60` | Seconds to wait for `jottad` responsiveness during each post-startup bootstrap phase. |
 | `JOTTAD_SYSTEMD` | `0` | Must stay `0` inside Docker since the container does not run systemd. |
 
 Container environment is loaded in this order:

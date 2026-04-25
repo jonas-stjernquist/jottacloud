@@ -40,6 +40,9 @@ const (
 	syncSetupTimeout    = 30 * time.Second
 	// Monitor cadence after startup; exposed via JOTTA_MONITOR_INTERVAL_SECONDS.
 	defaultMonitorInterval = 15 * time.Second
+	// Bounded wait used while the daemon is alive but temporarily busy during
+	// post-login bootstrap work.
+	defaultBootstrapTimeout = 60 * time.Second
 	// Grace period after adding backup directories to let jottad index
 	// them before we start issuing further CLI calls.
 	setupSettlingDelay = 3 * time.Second
@@ -266,19 +269,22 @@ func (a app) run(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	if err := a.configureBackups(); err != nil {
+	if err := a.configureBackups(ctx); err != nil {
 		return err
 	}
 	if err := a.configureSync(ctx); err != nil {
 		return err
 	}
-	if err := a.applyManagedIgnores(); err != nil {
+	if err := a.applyManagedIgnores(ctx); err != nil {
 		return err
 	}
-	if err := a.applyManagedConfig(); err != nil {
+	if err := a.applyManagedConfig(ctx); err != nil {
 		return err
 	}
 
+	if err := a.waitForResponsive(ctx, "start tail"); err != nil {
+		return err
+	}
 	tail, err := startAsyncProcess(a.runner, jottaCLI, []string{"tail"}, a.stdout, a.stderr)
 	if err != nil {
 		return fmt.Errorf("start tail: %w", err)
@@ -290,7 +296,7 @@ func (a app) run(ctx context.Context, args []string) error {
 }
 
 func (a app) waitForStartup(ctx context.Context) error {
-	startupTimeout := envInt("STARTUP_TIMEOUT", 30)
+	startupTimeout := envIntFrom(a.getenvValue, "STARTUP_TIMEOUT", 60)
 	fmt.Fprintf(a.stdout, "Waiting for jottad to start (timeout: %ds). ", startupTimeout)
 
 	for remaining := startupTimeout; remaining > 0; remaining-- {
@@ -369,11 +375,11 @@ func (a app) handleStartupStatus(ctx context.Context, kind statusKind) error {
 	}
 }
 
-func (a app) configureBackups() error {
-	return a.configureBackupsIn("/backup/*")
+func (a app) configureBackups(ctx context.Context) error {
+	return a.configureBackupsIn(ctx, "/backup/*")
 }
 
-func (a app) configureBackupsIn(globPattern string) error {
+func (a app) configureBackupsIn(ctx context.Context, globPattern string) error {
 	fmt.Fprintln(a.stdout, "Adding backup directories.")
 	matches, err := filepath.Glob(globPattern)
 	if err != nil {
@@ -392,7 +398,7 @@ func (a app) configureBackupsIn(globPattern string) error {
 		if !fi.IsDir() {
 			continue
 		}
-		out, err := a.runChecked(jottaCLI, "add", dir)
+		out, err := a.runCheckedRetry(ctx, "add backup directory", jottaCLI, "add", dir)
 		if err != nil {
 			if strings.Contains(out, "already added to backup") {
 				continue
@@ -429,7 +435,7 @@ func (a app) configureSync(ctx context.Context) error {
 
 	fmt.Fprintf(a.stdout, "Configuring sync directory at %s.\n", syncRootMountPath)
 	if persistedRoot != "" && persistedRoot != syncRootMountPath {
-		if err := a.reconfigureSyncRoot(persistedRoot); err != nil {
+		if err := a.reconfigureSyncRoot(ctx, persistedRoot); err != nil {
 			return err
 		}
 	}
@@ -438,13 +444,15 @@ func (a app) configureSync(ctx context.Context) error {
 		return err
 	}
 
-	_, err = a.runChecked(jottaCLI, "sync", "start")
-	return err
+	if _, err := a.runCheckedRetry(ctx, "start sync", jottaCLI, "sync", "start"); err != nil {
+		return err
+	}
+	return writePersistedSyncRoot(syncRootMountPath)
 }
 
-func (a app) reconfigureSyncRoot(oldRoot string) error {
+func (a app) reconfigureSyncRoot(ctx context.Context, oldRoot string) error {
 	fmt.Fprintf(a.stdout, "Sync root changed from %s to %s. Resetting local sync state.\n", oldRoot, syncRootMountPath)
-	if _, err := a.runChecked(jottaCLI, "sync", "reset"); err != nil {
+	if _, err := a.runCheckedRetry(ctx, "reset sync", jottaCLI, "sync", "reset"); err != nil {
 		return fmt.Errorf("reset sync root %s: %w", oldRoot, err)
 	}
 	return nil
@@ -473,6 +481,17 @@ func readPersistedSyncRoot() (string, error) {
 		return "", fmt.Errorf("read sync root state: %w", err)
 	}
 	return strings.TrimSpace(string(content)), nil
+}
+
+func writePersistedSyncRoot(root string) error {
+	path := syncRootStatePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("prepare sync root state dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(root)+"\n"), 0644); err != nil {
+		return fmt.Errorf("write sync root state: %w", err)
+	}
+	return nil
 }
 
 func syncRootStatePath() string {
@@ -623,7 +642,7 @@ func (a app) ensureSyncConfigured(ctx context.Context) error {
 	return nil
 }
 
-func (a app) applyManagedIgnores() error {
+func (a app) applyManagedIgnores(ctx context.Context) error {
 	desired, err := a.desiredIgnorePatterns()
 	if err != nil {
 		return err
@@ -634,7 +653,7 @@ func (a app) applyManagedIgnores() error {
 	}
 
 	for _, pattern := range subtractStrings(previous, desired) {
-		out, err := a.runChecked(jottaCLI, "ignores", "rem", "--pattern", pattern)
+		out, err := a.runCheckedRetry(ctx, "remove ignore pattern", jottaCLI, "ignores", "rem", "--pattern", pattern)
 		if err != nil {
 			if strings.Contains(out, "not found") {
 				continue
@@ -643,7 +662,7 @@ func (a app) applyManagedIgnores() error {
 		}
 	}
 	for _, pattern := range subtractStrings(desired, previous) {
-		out, err := a.runChecked(jottaCLI, "ignores", "add", "--pattern", pattern)
+		out, err := a.runCheckedRetry(ctx, "add ignore pattern", jottaCLI, "ignores", "add", "--pattern", pattern)
 		if err != nil {
 			if strings.Contains(out, "already") {
 				continue
@@ -668,7 +687,7 @@ func (a app) desiredIgnorePatterns() ([]string, error) {
 	return uniqueSorted(desired), nil
 }
 
-func (a app) applyManagedConfig() error {
+func (a app) applyManagedConfig(ctx context.Context) error {
 	desired, err := a.desiredConfigSettings()
 	if err != nil {
 		return err
@@ -687,7 +706,7 @@ func (a app) applyManagedConfig() error {
 		if previous[key] == desired[key] {
 			continue
 		}
-		if err := a.setConfigValue(key, desired[key]); err != nil {
+		if err := a.setConfigValue(ctx, key, desired[key]); err != nil {
 			return err
 		}
 	}
@@ -705,7 +724,7 @@ func (a app) applyManagedConfig() error {
 			fmt.Fprintf(a.stdout, "Warning: cannot reset %s automatically (unknown default), leaving current value unchanged.\n", key)
 			continue
 		}
-		if err := a.setConfigValue(key, defaultValue); err != nil {
+		if err := a.setConfigValue(ctx, key, defaultValue); err != nil {
 			return err
 		}
 	}
@@ -728,9 +747,9 @@ func (a app) desiredConfigSettings() (map[string]string, error) {
 	return desired, nil
 }
 
-func (a app) setConfigValue(key, value string) error {
+func (a app) setConfigValue(ctx context.Context, key, value string) error {
 	fmt.Fprintf(a.stdout, "Setting config %s=%s.\n", key, value)
-	_, err := a.runChecked(jottaCLI, "config", key, value)
+	_, err := a.runCheckedRetry(ctx, "set config", jottaCLI, "config", key, value)
 	return err
 }
 
@@ -799,6 +818,112 @@ func (a app) runChecked(name string, args ...string) (string, error) {
 		return out, nil
 	}
 	return out, formatCommandError(name, args, out, err)
+}
+
+func (a app) runCheckedRetry(ctx context.Context, phase, name string, args ...string) (string, error) {
+	timeout := a.bootstrapTimeout()
+	deadline := time.Now().Add(timeout)
+	backoff := time.Second
+	attempt := 1
+
+	for {
+		if err := a.waitForResponsiveUntil(ctx, phase, deadline); err != nil {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
+		out, err := a.runChecked(name, args...)
+		if err == nil || !isTransientBootstrapFailure(out, err) || time.Now().After(deadline) {
+			return out, err
+		}
+
+		fmt.Fprintf(a.stdout, "Warning: %s failed transiently on attempt %d: %v\n", phase, attempt, err)
+		attempt++
+		if !a.sleepUntil(ctx, deadline, backoff) {
+			return out, err
+		}
+		if backoff < 4*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func (a app) waitForResponsive(ctx context.Context, phase string) error {
+	return a.waitForResponsiveUntil(ctx, phase, time.Now().Add(a.bootstrapTimeout()))
+}
+
+func (a app) waitForResponsiveUntil(ctx context.Context, phase string, deadline time.Time) error {
+	var lastOut string
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		out, err := a.runner.Status(startupProbeTimeout)
+		if kind := classifyStatus(out); kind != statusUnknown {
+			return fmt.Errorf("%s: jottad is not ready (%s): %s", phase, kind, strings.TrimSpace(out))
+		}
+		if err == nil || strings.Contains(out, statusSyncDisabled) {
+			return nil
+		}
+
+		lastOut = out
+		lastErr = err
+		if time.Now().After(deadline) {
+			if trimmed := strings.TrimSpace(lastOut); trimmed != "" {
+				return fmt.Errorf("%s: jottad did not become responsive before bootstrap timeout: %s", phase, trimmed)
+			}
+			return fmt.Errorf("%s: jottad did not become responsive before bootstrap timeout: %w", phase, lastErr)
+		}
+
+		if !a.sleepUntil(ctx, deadline, time.Second) {
+			if trimmed := strings.TrimSpace(lastOut); trimmed != "" {
+				return fmt.Errorf("%s: jottad did not become responsive before bootstrap timeout: %s", phase, trimmed)
+			}
+			return fmt.Errorf("%s: jottad did not become responsive before bootstrap timeout: %w", phase, lastErr)
+		}
+	}
+}
+
+func (a app) sleepUntil(ctx context.Context, deadline time.Time, d time.Duration) bool {
+	if remaining := time.Until(deadline); remaining <= 0 {
+		return false
+	} else if d > remaining {
+		d = remaining
+	}
+
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+	if a.sleep != nil {
+		a.sleep(d)
+	} else {
+		time.Sleep(d)
+	}
+	return ctx.Err() == nil
+}
+
+func (a app) bootstrapTimeout() time.Duration {
+	return envDurationSecondsFrom(a.getenvValue, "BOOTSTRAP_TIMEOUT", defaultBootstrapTimeout)
+}
+
+func (a app) getenvValue(key string) string {
+	if a.getenv != nil {
+		return a.getenv(key)
+	}
+	return os.Getenv(key)
+}
+
+func isTransientBootstrapFailure(out string, err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(out + " " + err.Error()))
+	return strings.Contains(text, "context deadline exceeded") ||
+		strings.Contains(text, errStatusTimeout.Error())
 }
 
 func loginWithTokenWithRunner(ctx context.Context, runner commandRunner, getenv func(string) string) error {
