@@ -38,7 +38,9 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	os.Remove(binPath)
+	if err := os.Remove(binPath); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to remove fake-cli binary: %v\n", err)
+	}
 	os.Exit(code)
 }
 
@@ -646,7 +648,7 @@ func TestEnvDurationSecondsFrom(t *testing.T) {
 func TestForceSymlink_New(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
-	os.MkdirAll(target, 0755)
+	mkdirAll(t, target)
 	link := filepath.Join(dir, "link")
 
 	if err := forceSymlink(target, link); err != nil {
@@ -666,11 +668,13 @@ func TestForceSymlink_Replace(t *testing.T) {
 	dir := t.TempDir()
 	target1 := filepath.Join(dir, "target1")
 	target2 := filepath.Join(dir, "target2")
-	os.MkdirAll(target1, 0755)
-	os.MkdirAll(target2, 0755)
+	mkdirAll(t, target1)
+	mkdirAll(t, target2)
 	link := filepath.Join(dir, "link")
 
-	os.Symlink(target1, link)
+	if err := os.Symlink(target1, link); err != nil {
+		t.Fatal(err)
+	}
 	if err := forceSymlink(target2, link); err != nil {
 		t.Fatal(err)
 	}
@@ -687,9 +691,9 @@ func TestForceSymlink_Replace(t *testing.T) {
 func TestForceSymlink_RefusesExistingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
-	os.MkdirAll(target, 0755)
+	mkdirAll(t, target)
 	link := filepath.Join(dir, "link")
-	os.MkdirAll(link, 0755)
+	mkdirAll(t, link)
 
 	err := forceSymlink(target, link)
 	if err == nil {
@@ -703,7 +707,7 @@ func TestForceSymlink_RefusesExistingDirectory(t *testing.T) {
 func TestForceSymlink_ReplacesRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
-	os.MkdirAll(target, 0755)
+	mkdirAll(t, target)
 	link := filepath.Join(dir, "link")
 	if err := os.WriteFile(link, []byte("stale"), 0644); err != nil {
 		t.Fatal(err)
@@ -871,9 +875,20 @@ func writeTempFile(t *testing.T, content string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.WriteString(content)
-	f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return f.Name()
+}
+
+func mkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func withManagedPaths(t *testing.T) {
@@ -1148,7 +1163,7 @@ func TestApplyManagedConfig_FailsOnCommandError(t *testing.T) {
 func TestConfigureBackups_SkipsAlreadyAdded(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(dir, "backup", "already")
-	os.MkdirAll(backupDir, 0755)
+	mkdirAll(t, backupDir)
 
 	runner := &fakeRunner{
 		runResults: map[string][]fakeCmdResult{
@@ -1178,7 +1193,7 @@ func TestConfigureBackups_SkipsAlreadyAdded(t *testing.T) {
 func TestConfigureBackups_NewDirTriggersSettle(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(dir, "backup", "new")
-	os.MkdirAll(backupDir, 0755)
+	mkdirAll(t, backupDir)
 
 	runner := &fakeRunner{}
 	slept := false
@@ -1725,10 +1740,9 @@ func TestRotatingFileWriter_RotatesAndCapsBackups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w.Close()
 
 	for i := 0; i < 7; i++ {
-		if _, err := w.Write([]byte(fmt.Sprintf("%09d\n", i))); err != nil {
+		if _, err := fmt.Fprintf(w, "%09d\n", i); err != nil {
 			t.Fatal(err)
 		}
 	}
