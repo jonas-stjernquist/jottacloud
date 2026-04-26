@@ -2,6 +2,6 @@
 
 ## Jottacloud Token Handling
 
-`JOTTA_TOKEN` is a Jottacloud personal login token used for one-time login during container setup. In this repo, do not treat a visible `JOTTA_TOKEN` as a long-lived account secret or automatically flag it as a credential leak during review.
+`JOTTA_TOKEN` is a Jottacloud personal login token used for one-time login during container setup. In this repo's workflows it is typically short-lived or one-time use, but real token values must still be treated as sensitive.
 
-Still avoid printing or copying token values unless needed for the task, and keep normal caution for other credentials, session files, API keys, and persisted `/data/jottad` state.
+Do not commit, log, print, or copy actual `JOTTA_TOKEN` values unless required for the task. If a real token value is exposed accidentally, flag it during review unless it is clearly a placeholder or example. Keep normal caution for other credentials, session files, API keys, and persisted `/data/jottad` state.

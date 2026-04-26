@@ -864,14 +864,15 @@ func (a app) waitForResponsiveUntil(ctx context.Context, phase string, deadline 
 
 		out, err := a.runner.Status(startupProbeTimeout)
 		if kind := classifyStatus(out); kind != statusUnknown {
-			return fmt.Errorf("%s: jottad is not ready (%s): %s", phase, kind, strings.TrimSpace(out))
-		}
-		if err == nil || strings.Contains(out, statusSyncDisabled) {
+			if hsErr := a.handleStartupStatus(ctx, kind); hsErr != nil {
+				return hsErr
+			}
+		} else if err == nil || strings.Contains(out, statusSyncDisabled) {
 			return nil
+		} else {
+			lastOut = out
+			lastErr = err
 		}
-
-		lastOut = out
-		lastErr = err
 		if time.Now().After(deadline) {
 			if trimmed := strings.TrimSpace(lastOut); trimmed != "" {
 				return fmt.Errorf("%s: jottad did not become responsive before bootstrap timeout: %s", phase, trimmed)
