@@ -31,7 +31,8 @@ docker run \
 | `JOTTA_CONFIG_<SETTING>` | `""` | Override a managed `jotta-cli config` setting such as `JOTTA_CONFIG_SCANINTERVAL=12h`. |
 | `JOTTA_IGNORE_PATTERNS` | `""` | Extra ignore patterns added on top of `/data/jottad/ignorefile`. |
 | `LOCALTIME` | `Europe/Stockholm` | Timezone for the container. |
-| `STARTUP_TIMEOUT` | `30` | Seconds to wait for jottad to start before exiting with an error. |
+| `STARTUP_TIMEOUT` | `60` | Seconds to wait for jottad to start before exiting with an error. |
+| `BOOTSTRAP_TIMEOUT` | `60` | Seconds to wait for jottad responsiveness during each post-startup bootstrap phase. |
 | `JOTTAD_SYSTEMD` | `0` | Controls whether jottad attempts systemd integration (sd_notify, socket activation). Must be `0` inside Docker — containers don't run systemd. Set to `1` only when running jottad directly on a host with systemd. |
 
 ### Environment variable priority (highest last)

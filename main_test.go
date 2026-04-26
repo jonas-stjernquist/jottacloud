@@ -924,6 +924,16 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func countCalls(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	content, err := os.ReadFile(path)
@@ -1129,7 +1139,7 @@ func TestApplyManagedConfig_FailsOnCommandError(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	err := a.applyManagedConfig()
+	err := a.applyManagedConfig(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "bad config") {
 		t.Fatalf("applyManagedConfig error = %v, want command failure", err)
 	}
@@ -1157,7 +1167,7 @@ func TestConfigureBackups_SkipsAlreadyAdded(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.configureBackupsIn(filepath.Join(dir, "backup", "*")); err != nil {
+	if err := a.configureBackupsIn(context.Background(), filepath.Join(dir, "backup", "*")); err != nil {
 		t.Fatalf("configureBackups error = %v, want nil", err)
 	}
 	if slept {
@@ -1181,7 +1191,7 @@ func TestConfigureBackups_NewDirTriggersSettle(t *testing.T) {
 		monitorInterval: time.Millisecond,
 	}
 
-	if err := a.configureBackupsIn(filepath.Join(dir, "backup", "*")); err != nil {
+	if err := a.configureBackupsIn(context.Background(), filepath.Join(dir, "backup", "*")); err != nil {
 		t.Fatalf("configureBackups error = %v, want nil", err)
 	}
 	if !slept {
@@ -1252,7 +1262,7 @@ func TestApplyManagedIgnores_AddsNewPatterns(t *testing.T) {
 		getenv: func(string) string { return "" },
 	}
 
-	if err := a.applyManagedIgnores(); err != nil {
+	if err := a.applyManagedIgnores(context.Background()); err != nil {
 		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "a/new"})) {
@@ -1272,6 +1282,90 @@ func TestApplyManagedIgnores_AddsNewPatterns(t *testing.T) {
 	}
 }
 
+func TestApplyManagedIgnores_RetriesTransientContextDeadline(t *testing.T) {
+	runner := setupIgnoreTest(t, "flaky/pattern\n", "")
+	runner.statusResults = []fakeCmdResult{
+		{output: "ready", err: nil},
+		{output: "ready", err: nil},
+	}
+	runner.runResults = map[string][]fakeCmdResult{
+		cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "flaky/pattern"}): {
+			{output: "ERROR  context deadline exceeded", err: errors.New("exit status 1")},
+			{output: "", err: nil},
+		},
+	}
+	a := app{
+		runner: runner,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		sleep:  func(time.Duration) {},
+		getenv: envMap("BOOTSTRAP_TIMEOUT", "5"),
+	}
+
+	if err := a.applyManagedIgnores(context.Background()); err != nil {
+		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
+	}
+	runCall := "run " + cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "flaky/pattern"})
+	if got := countCalls(runner.calls, runCall); got != 2 {
+		t.Fatalf("ignore add attempts = %d, want 2; calls=%v", got, runner.calls)
+	}
+	persisted, err := readStateLines(managedIgnoreStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stringSlicesEqual(persisted, []string{"flaky/pattern"}) {
+		t.Fatalf("persisted state = %v, want [flaky/pattern]", persisted)
+	}
+}
+
+func TestRunCheckedRetry_DoesNotRetryPermanentError(t *testing.T) {
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{{output: "ready", err: nil}},
+		runResults: map[string][]fakeCmdResult{
+			cmdKey(jottaCLI, []string{"config", "scaninterval", "bad"}): {
+				{output: "bad config", err: errors.New("exit status 2")},
+			},
+		},
+	}
+	a := app{
+		runner: runner,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		sleep:  func(time.Duration) {},
+		getenv: envMap("BOOTSTRAP_TIMEOUT", "5"),
+	}
+
+	_, err := a.runCheckedRetry(context.Background(), "set config", jottaCLI, "config", "scaninterval", "bad")
+	if err == nil || !strings.Contains(err.Error(), "bad config") {
+		t.Fatalf("runCheckedRetry error = %v, want permanent command error", err)
+	}
+	runCall := "run " + cmdKey(jottaCLI, []string{"config", "scaninterval", "bad"})
+	if got := countCalls(runner.calls, runCall); got != 1 {
+		t.Fatalf("config attempts = %d, want 1; calls=%v", got, runner.calls)
+	}
+}
+
+func TestRunCheckedRetry_ProbesStatusBeforeCommand(t *testing.T) {
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{{output: "ready", err: nil}},
+	}
+	a := app{
+		runner: runner,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		sleep:  func(time.Duration) {},
+		getenv: envMap("BOOTSTRAP_TIMEOUT", "5"),
+	}
+
+	if _, err := a.runCheckedRetry(context.Background(), "add backup directory", jottaCLI, "add", "/backup/data"); err != nil {
+		t.Fatal(err)
+	}
+	wantRun := "run " + cmdKey(jottaCLI, []string{"add", "/backup/data"})
+	if len(runner.calls) < 2 || runner.calls[0] != "status" || runner.calls[1] != wantRun {
+		t.Fatalf("calls = %v, want status before %q", runner.calls, wantRun)
+	}
+}
+
 func TestApplyManagedIgnores_RemovesStalePatterns(t *testing.T) {
 	runner := setupIgnoreTest(t, "keep/me\n", "drop/me\nkeep/me\n")
 	a := app{
@@ -1281,7 +1375,7 @@ func TestApplyManagedIgnores_RemovesStalePatterns(t *testing.T) {
 		getenv: func(string) string { return "" },
 	}
 
-	if err := a.applyManagedIgnores(); err != nil {
+	if err := a.applyManagedIgnores(context.Background()); err != nil {
 		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"ignores", "rem", "--pattern", "drop/me"})) {
@@ -1309,7 +1403,7 @@ func TestApplyManagedIgnores_NoOpWhenStateMatches(t *testing.T) {
 		getenv: func(string) string { return "" },
 	}
 
-	if err := a.applyManagedIgnores(); err != nil {
+	if err := a.applyManagedIgnores(context.Background()); err != nil {
 		t.Fatalf("applyManagedIgnores error = %v, want nil", err)
 	}
 	for _, call := range runner.calls {
@@ -1392,7 +1486,7 @@ func TestApplyManagedConfig_ResetsUnsetKeyToDefault(t *testing.T) {
 		environ: func() []string { return nil },
 	}
 
-	if err := a.applyManagedConfig(); err != nil {
+	if err := a.applyManagedConfig(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "scaninterval", "1h0m0s"})) {
@@ -1426,7 +1520,7 @@ func TestApplyManagedConfig_ResetsMaxTransfersToCurrentDefaults(t *testing.T) {
 		environ: func() []string { return nil },
 	}
 
-	if err := a.applyManagedConfig(); err != nil {
+	if err := a.applyManagedConfig(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"config", "maxuploads", "12"})) {
@@ -1445,6 +1539,7 @@ func TestConfigureSync_EmptyMountedDirectoryTriggersSetup(t *testing.T) {
 
 	runner := &fakeRunner{
 		statusResults: []fakeCmdResult{
+			{output: statusSyncDisabled, err: errors.New("exit status 1")},
 			{output: statusSyncDisabled, err: errors.New("exit status 1")},
 		},
 	}
@@ -1465,6 +1560,9 @@ func TestConfigureSync_EmptyMountedDirectoryTriggersSetup(t *testing.T) {
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"sync", "start"})) {
 		t.Fatal("expected sync start after setup")
+	}
+	if got := readFile(t, syncRootStatePath()); strings.TrimSpace(got) != syncRootMountPath {
+		t.Fatalf("persisted sync root = %q, want %q", got, syncRootMountPath)
 	}
 }
 
@@ -1523,6 +1621,7 @@ func TestConfigureSync_ReconfiguresMismatchedRoot(t *testing.T) {
 
 	runner := &fakeRunner{
 		statusResults: []fakeCmdResult{
+			{output: statusSyncDisabled, err: errors.New("exit status 1")},
 			{output: statusSyncDisabled, err: errors.New("exit status 1")},
 		},
 	}
@@ -1584,6 +1683,9 @@ func TestConfigureSync_ExistingCanonicalRootStartsWithoutSetup(t *testing.T) {
 	}
 	if !runner.called("run " + cmdKey(jottaCLI, []string{"sync", "start"})) {
 		t.Fatal("expected sync start")
+	}
+	if got := readFile(t, syncRootStatePath()); strings.TrimSpace(got) != syncRootMountPath {
+		t.Fatalf("persisted sync root = %q, want %q", got, syncRootMountPath)
 	}
 }
 

@@ -18,7 +18,7 @@ if wait_for_startup 90; then
     pass "Container started"
 
     logs="$(container_logs 2>&1)"
-    assert_contains "$logs" "Adding sync directory" "sync directory setup logged"
+    assert_contains "$logs" "Configuring sync directory at /sync." "sync directory setup logged"
 else
     fail "Container did not start"
 fi

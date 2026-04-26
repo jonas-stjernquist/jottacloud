@@ -6,7 +6,8 @@ services:
     environment:
       - JOTTA_DEVICE=integration-test
       - JOTTA_CONFIG_SCANINTERVAL=1m
-      - STARTUP_TIMEOUT=30
+      - STARTUP_TIMEOUT=60
+      - BOOTSTRAP_TIMEOUT=60
       - LOCALTIME=Europe/Stockholm
     volumes:
       - ./data/jottad:/data/jottad

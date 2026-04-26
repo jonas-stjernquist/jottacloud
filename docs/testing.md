@@ -108,7 +108,7 @@ cd test
 |--------|---------------|
 | `test-first-login.sh` | Clean-state login: removes data dir, starts container, verifies login and device name |
 | `test-backup-dirs.sh` | Backup directory registration: verifies `/backup/documents` appears in `jotta-cli ls` |
-| `test-sync-setup.sh` | Sync directory setup: verifies "Adding sync directory" appears in logs |
+| `test-sync-setup.sh` | Sync directory setup: verifies "Configuring sync directory at /sync." appears in logs |
 | `test-scan-interval.sh` | Scan interval: verifies "Setting config scaninterval=1m." appears in logs |
 
 ### Test data
