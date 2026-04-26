@@ -31,17 +31,22 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Found APT version: $VERSION"
 
-      - name: Get latest GitHub release tag
-        id: gh
+      - name: Check whether release tag already exists
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "none")
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Latest GitHub release tag: $TAG"
+          TAG="v${{ steps.apt.outputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG does not exist"
+          fi
 
       - name: Create release if version is new
-        if: steps.apt.outputs.version != '' && format('v{0}', steps.apt.outputs.version) != steps.gh.outputs.tag
+        if: steps.apt.outputs.version != '' && steps.release.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
