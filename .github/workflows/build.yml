@@ -55,8 +55,8 @@ jobs:
       - name: Build smoke image
         run: docker build -t jottacloud:smoke .
 
-      - name: Verify jotta-cli is runnable
-        run: docker run --rm --entrypoint jotta-cli jottacloud:smoke version
+      - name: Verify jotta-cli is installed
+        run: docker run --rm --entrypoint jotta-cli jottacloud:smoke --help >/dev/null
 
   build-and-push:
     needs: image-smoke

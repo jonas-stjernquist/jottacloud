@@ -26,7 +26,7 @@ docker run \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only — credentials are saved to the `/data/jottad` volume after that. |
+| `JOTTA_TOKEN` | `unset` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only — credentials are saved to the `/data/jottad` volume after that. |
 | `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. Identifies which machine the backup belongs to. |
 | `JOTTA_CONFIG_<SETTING>` | `""` | Override a managed `jotta-cli config` setting such as `JOTTA_CONFIG_SCANINTERVAL=12h`. |
 | `JOTTA_IGNORE_PATTERNS` | `""` | Extra ignore patterns added on top of `/data/jottad/ignorefile`. |
