@@ -203,7 +203,7 @@ The entrypoint keeps sync setup intentionally simple:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JOTTA_TOKEN` | `**None**` | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only. |
+| `JOTTA_TOKEN` | unset | Personal login token from [Jottacloud Settings > Security](https://www.jottacloud.com/web/secure). Required for first login only. |
 | `JOTTA_DEVICE` | `**docker-jottacloud**` | Device name shown in Jottacloud. |
 | `JOTTA_CONFIG_<SETTING>` | `""` | Override a managed `jotta-cli config` setting, for example `JOTTA_CONFIG_MAXUPLOADS=4`. |
 | `JOTTA_IGNORE_PATTERNS` | `""` | Extra ignore patterns as comma- or newline-separated values. Added on top of `ignorefile`. |

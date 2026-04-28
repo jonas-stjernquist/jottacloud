@@ -20,8 +20,7 @@ LABEL maintainer="jonas-stjernquist" \
 
 VOLUME ["/data"]
 
-ENV JOTTA_TOKEN="**None**" \
-    JOTTA_DEVICE="**docker-jottacloud**" \
+ENV JOTTA_DEVICE="**docker-jottacloud**" \
     LOCALTIME="Europe/Stockholm" \
     STARTUP_TIMEOUT=60 \
     BOOTSTRAP_TIMEOUT=60 \
