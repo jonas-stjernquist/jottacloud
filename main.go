@@ -269,13 +269,13 @@ func (a app) run(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	if err := a.applyManagedIgnores(ctx); err != nil {
+		return err
+	}
 	if err := a.configureBackups(ctx); err != nil {
 		return err
 	}
 	if err := a.configureSync(ctx); err != nil {
-		return err
-	}
-	if err := a.applyManagedIgnores(ctx); err != nil {
 		return err
 	}
 	if err := a.applyManagedConfig(ctx); err != nil {
@@ -1021,7 +1021,7 @@ func ptyRun(ctx context.Context, name string, args []string, prompts []prompt, t
 				return cmd.Wait()
 			}
 			if result.chunk != "" {
-				fmt.Fprint(ptyOutput, result.chunk)
+				fmt.Fprint(ptyOutput, redactSensitivePromptEcho(result.chunk, prompts))
 				hadTerminalQuery, respErr := responder.respond(ptmx, result.chunk)
 				if respErr != nil {
 					_ = cmd.Process.Kill()
@@ -1066,6 +1066,21 @@ func ptyRun(ctx context.Context, name string, args []string, prompts []prompt, t
 			return fmt.Errorf("%s: %w", name, errPtyTimeout)
 		}
 	}
+}
+
+func redactSensitivePromptEcho(chunk string, prompts []prompt) string {
+	redacted := chunk
+	for _, p := range prompts {
+		if p.response == "" || !isSensitivePrompt(p.match) {
+			continue
+		}
+		redacted = strings.ReplaceAll(redacted, p.response, "[redacted]")
+	}
+	return redacted
+}
+
+func isSensitivePrompt(match string) bool {
+	return strings.Contains(strings.ToLower(match), "token")
 }
 
 func (execRunner) Run(name string, args ...string) (string, error) {
