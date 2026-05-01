@@ -116,6 +116,33 @@ func TestPtyRun_MultiplePrompts(t *testing.T) {
 	}
 }
 
+func TestPtyRun_RedactsTokenEcho(t *testing.T) {
+	setScenarioEnv(t, fakeScenario{
+		Steps: []fakeStep{
+			{Prompt: promptToken, Expect: "secret-token"},
+		},
+		FinalOutput: "Logged in.\n",
+	})
+
+	var output bytes.Buffer
+	oldOutput := ptyOutput
+	ptyOutput = &output
+	defer func() { ptyOutput = oldOutput }()
+
+	err := ptyRun(context.Background(), fakeCLIPath, nil, []prompt{
+		{promptToken, "secret-token"},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "secret-token") {
+		t.Fatalf("token leaked in PTY output: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "[redacted]") {
+		t.Fatalf("expected redacted token marker in PTY output: %q", output.String())
+	}
+}
+
 func TestPtyRun_MutuallyExclusivePrompts(t *testing.T) {
 	// Simulate login flow where only "Device name" appears (not re-use).
 	setScenarioEnv(t, fakeScenario{
