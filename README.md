@@ -13,6 +13,8 @@ This image wraps the official `jotta-cli` package with a Go entrypoint that:
 
 Supported platforms: `linux/amd64`, `linux/arm64`
 
+Docker Hub: [stjernquist/jottacloud](https://hub.docker.com/r/stjernquist/jottacloud)
+
 ## Quick Start
 
 ```bash
