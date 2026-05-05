@@ -1897,7 +1897,7 @@ func TestRun_AppliesConfigAndIgnoresBeforeBackupRegistration(t *testing.T) {
 	if configIdx == -1 || ignoreIdx == -1 || backupIdx == -1 {
 		t.Fatalf("missing expected calls config=%d ignore=%d backup=%d calls=%v", configIdx, ignoreIdx, backupIdx, runner.calls)
 	}
-	if !(configIdx < ignoreIdx && ignoreIdx < backupIdx) {
+	if configIdx >= ignoreIdx || ignoreIdx >= backupIdx {
 		t.Fatalf("bootstrap order calls=%v, want config before ignores before backup", runner.calls)
 	}
 }
