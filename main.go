@@ -86,6 +86,7 @@ var (
 	configDir             = "/data/jottad/jotta-cli"
 	configFilePath        = "/data/jottad/jotta-config.env"
 	ignoreFilePath        = "/data/jottad/ignorefile"
+	backupGlobPattern     = "/backup/*"
 	rootJottadPath        = "/root/.jottad"
 	rootJottaCLIConfigDir = "/root/.config/jotta-cli"
 	syncRootMountPath     = "/sync"
@@ -269,6 +270,9 @@ func (a app) run(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	if err := a.applyManagedConfig(ctx); err != nil {
+		return err
+	}
 	if err := a.applyManagedIgnores(ctx); err != nil {
 		return err
 	}
@@ -276,9 +280,6 @@ func (a app) run(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := a.configureSync(ctx); err != nil {
-		return err
-	}
-	if err := a.applyManagedConfig(ctx); err != nil {
 		return err
 	}
 
@@ -376,7 +377,7 @@ func (a app) handleStartupStatus(ctx context.Context, kind statusKind) error {
 }
 
 func (a app) configureBackups(ctx context.Context) error {
-	return a.configureBackupsIn(ctx, "/backup/*")
+	return a.configureBackupsIn(ctx, backupGlobPattern)
 }
 
 func (a app) configureBackupsIn(ctx context.Context, globPattern string) error {
@@ -773,8 +774,20 @@ func (a app) monitor(ctx context.Context, tail asyncProcess) error {
 			}
 			return errors.New("jotta-cli tail exited unexpectedly")
 		case <-ticker.C:
-			out, err := a.runner.Status(startupProbeTimeout)
+			out, err := a.runner.Status(healthcheckTimeout)
+			if kind := classifyStatus(out); kind != statusUnknown {
+				fmt.Fprintln(a.stdout, "Jottad reported unhealthy status:")
+				fmt.Fprint(a.stdout, out)
+				if !strings.HasSuffix(out, "\n") {
+					fmt.Fprintln(a.stdout)
+				}
+				return fmt.Errorf("status health check failed: unhealthy status %s", kind)
+			}
 			if err != nil {
+				if errors.Is(err, errStatusTimeout) {
+					fmt.Fprintln(a.stdout, "Warning: jottad status probe timed out; continuing.")
+					continue
+				}
 				fmt.Fprintln(a.stdout, "Jottad exited unexpectedly:")
 				if out != "" {
 					fmt.Fprint(a.stdout, out)

@@ -926,26 +926,35 @@ func withManagedPaths(t *testing.T) {
 	oldConfigDir := configDir
 	oldConfigFilePath := configFilePath
 	oldIgnoreFilePath := ignoreFilePath
+	oldBackupGlobPattern := backupGlobPattern
 	oldRootJottadPath := rootJottadPath
 	oldRootJottaCLIConfigDir := rootJottaCLIConfigDir
 	oldSyncRootMountPath := syncRootMountPath
+	oldManagedIgnoreStatePath := managedIgnoreStatePath
+	oldManagedConfigStatePath := managedConfigStatePath
 
 	dataDir = filepath.Join(baseDir, "data", "jottad")
 	configDir = filepath.Join(dataDir, "jotta-cli")
 	configFilePath = filepath.Join(dataDir, "jotta-config.env")
 	ignoreFilePath = filepath.Join(dataDir, "ignorefile")
+	backupGlobPattern = filepath.Join(baseDir, "backup", "*")
 	rootJottadPath = filepath.Join(baseDir, "root", ".jottad")
 	rootJottaCLIConfigDir = filepath.Join(baseDir, "root", ".config", "jotta-cli")
 	syncRootMountPath = filepath.Join(baseDir, "sync")
+	managedIgnoreStatePath = filepath.Join(dataDir, "managed-ignores.state")
+	managedConfigStatePath = filepath.Join(dataDir, "managed-config.state")
 
 	t.Cleanup(func() {
 		dataDir = oldDataDir
 		configDir = oldConfigDir
 		configFilePath = oldConfigFilePath
 		ignoreFilePath = oldIgnoreFilePath
+		backupGlobPattern = oldBackupGlobPattern
 		rootJottadPath = oldRootJottadPath
 		rootJottaCLIConfigDir = oldRootJottaCLIConfigDir
 		syncRootMountPath = oldSyncRootMountPath
+		managedIgnoreStatePath = oldManagedIgnoreStatePath
+		managedConfigStatePath = oldManagedConfigStatePath
 	})
 
 }
@@ -1839,6 +1848,60 @@ func TestRun_HealthcheckPreparesPersistentPaths(t *testing.T) {
 	}
 }
 
+func TestRun_AppliesConfigAndIgnoresBeforeBackupRegistration(t *testing.T) {
+	withManagedPaths(t)
+	backupDir := filepath.Join(filepath.Dir(backupGlobPattern), "photo")
+	mkdirAll(t, backupDir)
+
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configFilePath, []byte("scaninterval=30m\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoreFilePath, []byte("a/new\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: "ready", err: nil},
+			{output: "ready", err: nil},
+			{output: "ready", err: nil},
+			{output: "ready", err: nil},
+			{output: "ready", err: nil},
+		},
+	}
+	a := app{
+		runner:          runner,
+		stdout:          io.Discard,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          envMap("LOCALTIME", ""),
+		environ:         func() []string { return nil },
+		setenv:          os.Setenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.run(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "jotta-cli tail exited unexpectedly") {
+		t.Fatalf("run error = %v, want tail exit after bootstrap", err)
+	}
+
+	configCall := "run " + cmdKey(jottaCLI, []string{"config", "scaninterval", "30m"})
+	ignoreCall := "run " + cmdKey(jottaCLI, []string{"ignores", "add", "--pattern", "a/new"})
+	backupCall := "run " + cmdKey(jottaCLI, []string{"add", backupDir})
+	configIdx := indexCall(runner.calls, configCall)
+	ignoreIdx := indexCall(runner.calls, ignoreCall)
+	backupIdx := indexCall(runner.calls, backupCall)
+	if configIdx == -1 || ignoreIdx == -1 || backupIdx == -1 {
+		t.Fatalf("missing expected calls config=%d ignore=%d backup=%d calls=%v", configIdx, ignoreIdx, backupIdx, runner.calls)
+	}
+	if !(configIdx < ignoreIdx && ignoreIdx < backupIdx) {
+		t.Fatalf("bootstrap order calls=%v, want config before ignores before backup", runner.calls)
+	}
+}
+
 func TestHealthcheck_FatalStatuses(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1901,6 +1964,76 @@ func TestMonitor_ReturnsOnHealthCheckFailure(t *testing.T) {
 	}
 }
 
+func TestMonitor_ReturnsOnFatalStatusText(t *testing.T) {
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: statusSessionRevoked, err: errStatusTimeout},
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	err := a.monitor(context.Background(), asyncProcess{done: make(chan error)})
+	if err == nil || !strings.Contains(err.Error(), "unhealthy status") {
+		t.Fatalf("monitor error = %v, want unhealthy status", err)
+	}
+	if !strings.Contains(stdout.String(), statusSessionRevoked) {
+		t.Fatalf("expected fatal status output in stdout, got %q", stdout.String())
+	}
+}
+
+func TestMonitor_ContinuesOnStatusTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var gotTimeout time.Duration
+	runner := &fakeRunner{
+		statusResults: []fakeCmdResult{
+			{output: "", err: errStatusTimeout},
+		},
+		statusHook: func(timeout time.Duration, result fakeCmdResult) {
+			gotTimeout = timeout
+			cancel()
+		},
+	}
+	var stdout bytes.Buffer
+	a := app{
+		runner:          runner,
+		stdout:          &stdout,
+		stderr:          io.Discard,
+		sleep:           func(time.Duration) {},
+		getenv:          os.Getenv,
+		monitorInterval: time.Millisecond,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- a.monitor(ctx, asyncProcess{done: make(chan error)})
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("monitor error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitor did not return after context cancellation")
+	}
+	if gotTimeout != healthcheckTimeout {
+		t.Fatalf("monitor status timeout = %s, want %s", gotTimeout, healthcheckTimeout)
+	}
+	if !strings.Contains(stdout.String(), "status probe timed out") {
+		t.Fatalf("expected timeout warning in stdout, got %q", stdout.String())
+	}
+}
+
 func TestMonitor_IgnoresRunJottadLauncherExit(t *testing.T) {
 	runner := &fakeRunner{
 		statusResults: []fakeCmdResult{
@@ -1952,6 +2085,7 @@ type fakeRunner struct {
 	statusResults []fakeCmdResult
 	ptyErrors     map[string]error
 	calls         []string
+	statusHook    func(time.Duration, fakeCmdResult)
 }
 
 func (r *fakeRunner) Run(name string, args ...string) (string, error) {
@@ -1982,10 +2116,16 @@ func (r *fakeRunner) PtyRun(ctx context.Context, name string, args []string, pro
 func (r *fakeRunner) Status(timeout time.Duration) (string, error) {
 	r.calls = append(r.calls, "status")
 	if len(r.statusResults) == 0 {
+		if r.statusHook != nil {
+			r.statusHook(timeout, fakeCmdResult{})
+		}
 		return "", nil
 	}
 	result := r.statusResults[0]
 	r.statusResults = r.statusResults[1:]
+	if r.statusHook != nil {
+		r.statusHook(timeout, result)
+	}
 	return result.output, result.err
 }
 
@@ -1996,6 +2136,15 @@ func (r *fakeRunner) called(want string) bool {
 		}
 	}
 	return false
+}
+
+func indexCall(calls []string, want string) int {
+	for i, call := range calls {
+		if call == want {
+			return i
+		}
+	}
+	return -1
 }
 
 type fakeProcess struct {
